@@ -1,0 +1,96 @@
+# server.py
+#
+# Decisão de arquitetura: uso WebSocket (não polling REST) porque o app
+# mobile precisa saber "partida encontrada" com o mínimo de latência
+# possível. Isso significa que o PC precisa EMPURRAR o evento para os
+# clientes conectados assim que o monitor detectar o match.
+#
+# Complicador: o monitor de tela roda numa thread síncrona comum
+# (threading.Thread), mas o FastAPI/uvicorn roda num event loop asyncio
+# dentro de OUTRA thread. Não dá para chamar uma corrotina asyncio
+# diretamente de uma thread síncrona — por isso o uso de
+# asyncio.run_coroutine_threadsafe, que agenda a execução no loop certo
+# de forma segura entre threads.
+
+import asyncio
+import threading
+
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+app = FastAPI()
+
+# Conexões websocket ativas (celulares conectados).
+_conexoes: set[WebSocket] = set()
+
+# Referência ao event loop em que o servidor está rodando.
+# É preenchida quando a thread do servidor sobe (ver ServidorThread.run).
+_server_loop: asyncio.AbstractEventLoop | None = None
+
+
+@app.get("/ping")
+async def ping():
+    """Endpoint simples para o app mobile testar a conexão antes de
+    abrir o WebSocket (útil pra validar o IP digitado/QR lido)."""
+    return {"status": "ok"}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    _conexoes.add(websocket)
+    try:
+        while True:
+            # Não esperamos nada específico do celular; só mantemos a
+            # conexão viva. Se o cliente desconectar, receive_text()
+            # lança WebSocketDisconnect e caímos no except.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        _conexoes.discard(websocket)
+
+
+async def _broadcast_partida_encontrada():
+    conexoes_mortas = []
+    for ws in _conexoes:
+        try:
+            await ws.send_json({"status": "PARTIDA_ENCONTRADA"})
+        except Exception:
+            conexoes_mortas.append(ws)
+    for ws in conexoes_mortas:
+        _conexoes.discard(ws)
+
+
+def notificar_partida_encontrada():
+    """
+    Ponto de entrada chamado pela THREAD DE MONITORAMENTO (síncrona).
+    Agenda o broadcast assíncrono no event loop do servidor.
+    """
+    if _server_loop is not None:
+        asyncio.run_coroutine_threadsafe(
+            _broadcast_partida_encontrada(), _server_loop
+        )
+
+
+class ServidorThread(threading.Thread):
+    """
+    Sobe o uvicorn dentro de uma thread com seu próprio event loop,
+    para não travar a GUI do CustomTkinter (que roda na thread principal).
+    """
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 8000):
+        super().__init__(daemon=True)
+        self._config = uvicorn.Config(
+            app, host=host, port=port, log_level="warning"
+        )
+        self._server = uvicorn.Server(self._config)
+
+    def run(self):
+        global _server_loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _server_loop = loop
+        loop.run_until_complete(self._server.serve())
+
+    def parar(self):
+        # Sinaliza para o uvicorn encerrar o serve() de forma graciosa.
+        self._server.should_exit = True
