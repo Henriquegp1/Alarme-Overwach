@@ -37,6 +37,25 @@ _conexoes: set[WebSocket] = set()
 # É preenchida quando a thread do servidor sobe (ver ServidorThread.run).
 _server_loop: asyncio.AbstractEventLoop | None = None
 
+# Callback opcional, definido pela GUI, chamado sempre que o número de
+# celulares conectados muda entre "zero" e "um ou mais". Recebe um bool
+# (True = pelo menos um celular conectado). Roda dentro do event loop do
+# servidor -- quem registrar o callback é responsável por marcar de volta
+# para a thread principal (ex.: via self.after(0, ...) no CustomTkinter),
+# do mesmo jeito que já é feito com notificar_partida_encontrada.
+_on_conexao_mudou = None
+
+
+def definir_callback_conexao(callback):
+    """Registra (ou remove, passando None) o callback de mudança de conexão."""
+    global _on_conexao_mudou
+    _on_conexao_mudou = callback
+
+
+def _avisar_mudanca_conexao():
+    if _on_conexao_mudou is not None:
+        _on_conexao_mudou(len(_conexoes) > 0)
+
 
 @app.get("/ping")
 async def ping():
@@ -69,6 +88,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     await websocket.accept()
     _conexoes.add(websocket)
+    _avisar_mudanca_conexao()
     try:
         while True:
             # Não esperamos nada específico do celular; só mantemos a
@@ -76,7 +96,10 @@ async def websocket_endpoint(websocket: WebSocket):
             # lança WebSocketDisconnect e caímos no except.
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         _conexoes.discard(websocket)
+        _avisar_mudanca_conexao()
 
 
 async def _broadcast_partida_encontrada():
