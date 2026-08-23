@@ -49,7 +49,18 @@ class MonitorPartida(threading.Thread):
             while not self._parar_flag.is_set():
                 inicio = time.time()
 
-                frame = np.array(sct.grab(self.regiao))
+                try:
+                    frame = np.array(sct.grab(self.regiao))
+                except mss.exception.ScreenShotError as e:
+                    # Falha transitoria do Windows ao capturar a tela
+                    # (tela bloqueada, monitor dormindo, troca de
+                    # resolucao, alternancia fullscreen exclusivo).
+                    # Nao derruba a thread inteira -- so pula esse frame
+                    # e tenta de novo no proximo ciclo.
+                    print(f"[monitor] Falha na captura, tentando de novo: {e}")
+                    self._esperar_com_flag(self.intervalo)
+                    continue
+
                 frame_cinza = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
 
                 resultado = cv2.matchTemplate(
@@ -60,14 +71,12 @@ class MonitorPartida(threading.Thread):
                 if confianca_max >= self.threshold:
                     if self.on_match:
                         self.on_match()
-                    # Evita disparar o alarme várias vezes seguidas
-                    # enquanto a tela de "partida encontrada" ainda
-                    # está visível.
                     self._esperar_com_flag(self.cooldown)
                     continue
 
                 decorrido = time.time() - inicio
                 self._esperar_com_flag(max(0.0, self.intervalo - decorrido))
+
 
     def _esperar_com_flag(self, segundos: float):
         """time.sleep, mas interrompível pelo evento de parada —

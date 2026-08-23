@@ -6,10 +6,10 @@
 # tirando um print da tela "Partida Encontrada" e anotando a posição/tamanho
 # real da caixa de texto/ícone na SUA resolução.
 REGIAO_CAPTURA = {
-    "top": 1,
-    "left": 805,
-    "width": 311,
-    "height": 88,
+    "top": 400,
+    "left": 700,
+    "width": 500,
+    "height": 150,
 }
 
 # Caminho do template (recorte da tela "Partida Encontrada" em escala de cinza).
@@ -27,4 +27,15 @@ INTERVALO_CAPTURA = 1.0
 COOLDOWN_APOS_MATCH = 5.0
 
 PORTA_SERVIDOR = 8000
- 
+
+# --- Autenticação do WebSocket ---------------------------------------
+
+# Onde a senha personalizada (hash+salt, nunca texto puro) é guardada.
+ARQUIVO_CREDENCIAIS = "data/credentials.json"
+
+# Rate limiting das tentativas de autenticação no WebSocket.
+# Depois de MAX_TENTATIVAS_AUTH falhas dentro de JANELA_TENTATIVAS_AUTH
+# segundos, o IP fica bloqueado por TEMPO_BLOQUEIO_AUTH segundos.
+MAX_TENTATIVAS_AUTH = 5
+JANELA_TENTATIVAS_AUTH = 60
+TEMPO_BLOQUEIO_AUTH = 300

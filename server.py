@@ -11,16 +11,26 @@
 # diretamente de uma thread síncrona — por isso o uso de
 # asyncio.run_coroutine_threadsafe, que agenda a execução no loop certo
 # de forma segura entre threads.
+#
+# AUTENTICAÇÃO: a conexão só é aceita (`await websocket.accept()`) DEPOIS
+# de validar a credencial em `?token=`. Uma conexão não autenticada nunca
+# é aceita, nunca entra em `_conexoes`, e portanto nunca recebe broadcast.
+# Isso é intencional -- rejeitar antes do accept é o único jeito de o
+# cliente nunca "entrar" no servidor sem credencial válida.
 
 import asyncio
+import logging
 import threading
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
+
+import auth
 
 app = FastAPI()
+logger = logging.getLogger("overwatch_alarm.server")
 
-# Conexões websocket ativas (celulares conectados).
+# Conexões websocket ativas E autenticadas (celulares conectados).
 _conexoes: set[WebSocket] = set()
 
 # Referência ao event loop em que o servidor está rodando.
@@ -31,12 +41,32 @@ _server_loop: asyncio.AbstractEventLoop | None = None
 @app.get("/ping")
 async def ping():
     """Endpoint simples para o app mobile testar a conexão antes de
-    abrir o WebSocket (útil pra validar o IP digitado/QR lido)."""
+    abrir o WebSocket (útil pra validar o IP digitado/QR lido). Não
+    exige autenticação -- só confirma que o servidor está de pé."""
     return {"status": "ok"}
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    ip_cliente = websocket.client.host if websocket.client else "desconhecido"
+
+    if auth.rate_limiter.ip_bloqueado(ip_cliente):
+        # Rejeita sem nem tentar validar a credencial -- o IP já
+        # excedeu o limite de tentativas recentemente.
+        logger.warning("IP bloqueado por excesso de tentativas: %s", ip_cliente)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    token = websocket.query_params.get("token")
+
+    if not auth.credencial_valida(token):
+        auth.rate_limiter.registrar_falha(ip_cliente)
+        logger.warning("Tentativa de autenticação inválida. IP: %s", ip_cliente)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    auth.rate_limiter.registrar_sucesso(ip_cliente)
+
     await websocket.accept()
     _conexoes.add(websocket)
     try:
