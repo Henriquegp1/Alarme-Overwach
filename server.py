@@ -21,6 +21,7 @@
 import asyncio
 import logging
 import threading
+import json
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
@@ -50,6 +51,10 @@ def definir_callback_conexao(callback):
     """Registra (ou remove, passando None) o callback de mudança de conexão."""
     global _on_conexao_mudou
     _on_conexao_mudou = callback
+
+def definir_callback_confirmacao(cb):
+    global _callback_confirmacao
+    _callback_confirmacao = cb
 
 
 def _avisar_mudanca_conexao():
@@ -91,10 +96,15 @@ async def websocket_endpoint(websocket: WebSocket):
     _avisar_mudanca_conexao()
     try:
         while True:
-            # Não esperamos nada específico do celular; só mantemos a
-            # conexão viva. Se o cliente desconectar, receive_text()
-            # lança WebSocketDisconnect e caímos no except.
-            await websocket.receive_text()
+            texto = await websocket.receive_text()
+            try:
+                dados = json.loads(texto)
+                # Dispara o aviso para o gui.py se o celular mandar o status certo
+                if dados.get("status") == "ALARME_RECEBIDO_CELULAR":
+                    if _callback_confirmacao:
+                        _callback_confirmacao()
+            except json.JSONDecodeError:
+                pass 
     except WebSocketDisconnect:
         pass
     finally:

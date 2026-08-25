@@ -38,7 +38,6 @@ logs/
 # Builds / distribuição
 build/
 dist/
-*.spec
 
 # Cache de ferramentas
 .pytest_cache/
@@ -47,3 +46,4 @@ dist/
 
 # Arquivos de debug
 debug/
+debug_capura_atual.png
