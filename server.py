@@ -31,8 +31,28 @@ import auth
 app = FastAPI()
 logger = logging.getLogger("overwatch_alarm.server")
 
+# Segundos sem nenhuma mensagem do celular antes do servidor mandar um
+# ping de verificação. Depois de _MAX_PINGS_SEM_RESPOSTA pings seguidos
+# sem resposta, a conexão é considerada morta e removida manualmente.
+#
+# Por que isso é necessário: `await websocket.receive_text()` sozinho
+# só retorna quando o TCP recebe um sinal explícito de fechamento --
+# mas isso nem sempre acontece (Wi-Fi caiu, app do celular foi morto à
+# força pelo sistema, ou o app abriu uma conexão nova sem fechar a
+# antiga ao trocar de senha). Sem essa checagem ativa, uma conexão
+# morta fica presa em _conexoes para sempre, e como o status "Celular
+# conectado" é só `len(_conexoes) > 0`, isso trava o status como
+# "conectado" mesmo com o celular desligado há muito tempo.
+_TIMEOUT_PING = 15
+_MAX_PINGS_SEM_RESPOSTA = 2
+
 # Conexões websocket ativas E autenticadas (celulares conectados).
 _conexoes: set[WebSocket] = set()
+
+# Usado só pela verificação manual (botão 🔄 na GUI): quando um pong é
+# aguardado para uma conexão específica, o Event correspondente fica
+# aqui até o pong chegar (ou até o timeout desistir e removê-lo).
+_aguardando_pong: dict[WebSocket, asyncio.Event] = {}
 
 # Referência ao event loop em que o servidor está rodando.
 # É preenchida quando a thread do servidor sobe (ver ServidorThread.run).
@@ -94,21 +114,52 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     _conexoes.add(websocket)
     _avisar_mudanca_conexao()
+
+    pings_sem_resposta = 0
     try:
         while True:
-            texto = await websocket.receive_text()
+            try:
+                texto = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=_TIMEOUT_PING,
+                )
+            except asyncio.TimeoutError:
+                pings_sem_resposta += 1
+                if pings_sem_resposta > _MAX_PINGS_SEM_RESPOSTA:
+                    # Sem resposta a vários pings seguidos -- trata como
+                    # desconectado mesmo sem ter recebido WebSocketDisconnect.
+                    logger.info("Conexão sem resposta a pings, encerrando: %s", ip_cliente)
+                    break
+                try:
+                    await websocket.send_json({"tipo": "ping"})
+                except Exception:
+                    # Não conseguiu nem mandar o ping -- a conexão já
+                    # está morta, não precisa esperar os pings restantes.
+                    break
+                continue
+
+            pings_sem_resposta = 0  # qualquer mensagem prova que a conexão está viva
             try:
                 dados = json.loads(texto)
                 # Dispara o aviso para o gui.py se o celular mandar o status certo
                 if dados.get("status") == "ALARME_RECEBIDO_CELULAR":
                     if _callback_confirmacao:
                         _callback_confirmacao()
+                elif dados.get("tipo") == "pong":
+                    # Resposta ao ping -- só importa se alguém estiver
+                    # esperando por ela agora (verificação manual via
+                    # verificar_conexoes_agora). Fora disso, o pong só
+                    # serviu pra resetar pings_sem_resposta acima, o que
+                    # já é suficiente pro ciclo passivo.
+                    evento = _aguardando_pong.get(websocket)
+                    if evento is not None:
+                        evento.set()
             except json.JSONDecodeError:
-                pass 
+                pass
     except WebSocketDisconnect:
         pass
     finally:
         _conexoes.discard(websocket)
+        _aguardando_pong.pop(websocket, None)
         _avisar_mudanca_conexao()
 
 
@@ -119,8 +170,81 @@ async def _broadcast_partida_encontrada():
             await ws.send_json({"status": "PARTIDA_ENCONTRADA"})
         except Exception:
             conexoes_mortas.append(ws)
-    for ws in conexoes_mortas:
-        _conexoes.discard(ws)
+    if conexoes_mortas:
+        for ws in conexoes_mortas:
+            _conexoes.discard(ws)
+        # Antes, essa limpeza acontecia em silêncio -- a GUI só ficava
+        # sabendo que uma conexão morreu na próxima vez que qualquer
+        # outro evento disparasse _avisar_mudanca_conexao(), o que podia
+        # nunca acontecer. Avisar aqui também fecha essa lacuna.
+        _avisar_mudanca_conexao()
+
+
+async def _verificar_conexoes_vivas():
+    """
+    Checagem ATIVA e imediata, disparada manualmente pela GUI (botão 🔄)
+    -- não espera o ciclo passivo de 15s+pings do websocket_endpoint.
+
+    Diferente da primeira versão disso: agora espera de verdade uma
+    resposta (pong) do celular, com um timeout curto (3s). Só checar se
+    o ENVIO do ping funcionou não bastava -- TCP normalmente aceita o
+    envio no buffer local mesmo que o outro lado já tenha sumido, então
+    aquilo nunca detectava nada de errado de verdade.
+    """
+    conexoes_mortas = []
+    for ws in list(_conexoes):
+        evento = asyncio.Event()
+        _aguardando_pong[ws] = evento
+        try:
+            await ws.send_json({"tipo": "ping"})
+            await asyncio.wait_for(evento.wait(), timeout=3)
+        except Exception:
+            conexoes_mortas.append(ws)
+        finally:
+            _aguardando_pong.pop(ws, None)
+
+    if conexoes_mortas:
+        for ws in conexoes_mortas:
+            _conexoes.discard(ws)
+        _avisar_mudanca_conexao()
+
+
+async def _desconectar_todos():
+    """
+    Fecha TODA conexão ativa de forma explícita. Usado quando a senha
+    muda: em vez de deixar sessões antigas penduradas até o ping/timeout
+    passivo perceber que morreram (~30-45s, ou nunca, se o celular
+    reconectar rápido demais e criar uma zumbi), fechamos elas na hora,
+    de forma limpa -- o próprio `finally` do websocket_endpoint já cuida
+    de remover de _conexoes e avisar a GUI, do jeito que sempre fez para
+    fechamentos normais. Isso elimina o problema pela raiz, em vez de só
+    detectar melhor o sintoma depois que ele já aconteceu.
+    """
+    for ws in list(_conexoes):
+        try:
+            await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Senha alterada")
+        except Exception:
+            pass
+
+
+def desconectar_todos_por_troca_de_senha():
+    """
+    Ponto de entrada síncrono, chamado pela THREAD DA GUI logo depois de
+    salvar uma senha nova -- mesmo padrão de notificar_partida_encontrada
+    e verificar_conexoes_agora.
+    """
+    if _server_loop is not None:
+        asyncio.run_coroutine_threadsafe(_desconectar_todos(), _server_loop)
+
+
+def verificar_conexoes_agora():
+    """
+    Ponto de entrada síncrono, chamado pela THREAD DA GUI (Tkinter) --
+    agenda a checagem ativa no event loop do servidor, do mesmo jeito
+    que notificar_partida_encontrada já faz.
+    """
+    if _server_loop is not None:
+        asyncio.run_coroutine_threadsafe(_verificar_conexoes_vivas(), _server_loop)
 
 
 def notificar_partida_encontrada():
@@ -143,7 +267,16 @@ class ServidorThread(threading.Thread):
     def __init__(self, host: str = "0.0.0.0", port: int = 8000):
         super().__init__(daemon=True)
         self._config = uvicorn.Config(
-            app, host=host, port=port, log_level="warning"
+            app, host=host, port=port, log_level="warning",
+            # log_config=None desliga o dictConfig padrão do uvicorn.
+            # Sem isso, o app crasha ao subir quando empacotado com
+            # --windowed: o uvicorn tenta checar sys.stderr.isatty()
+            # pra decidir se usa cores no log, mas sob --windowed o
+            # processo não tem stderr nenhum (é None, não vazio) --
+            # AttributeError: 'NoneType' object has no attribute
+            # 'isatty'. Como não existe console pra ver esses logs de
+            # qualquer forma nesse modo, desligar é seguro.
+            log_config=None,
         )
         self._server = uvicorn.Server(self._config)
 

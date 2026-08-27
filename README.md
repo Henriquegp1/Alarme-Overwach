@@ -26,17 +26,20 @@ overwatch_alarm_pc/
 ├── server.py             # FastAPI + WebSocket (autenticado), roda em thread própria
 ├── auth.py                # token de sessão + senha personalizada (hash+salt) + rate limiting
 ├── monitor.py              # captura de tela (mss) + template matching (OpenCV)
-├── config.py                # todas as constantes ajustáveis
+├── calibracao.py            # lista monitores, captura tela, salva região+template pela GUI
+├── config.py                # constantes ajustáveis + leitura da calibração salva
 ├── theme.py                  # paleta de cores e identidade visual centralizada
 ├── utils.py                   # descoberta de IP local
-├── calibrar_regiao.py          # gera REGIAO_CAPTURA e template automaticamente
-├── listar_monitores.py          # lista monitores disponíveis (multi-monitor)
+├── calibrar_regiao.py          # (legado) gera REGIAO_CAPTURA e template por fora da GUI
+├── listar_monitores.py          # (legado) lista monitores disponíveis por fora da GUI
 ├── teste_matching.py             # testa o template matching isoladamente
-├── test_auth.py                   # 21 testes automatizados de auth.py (localização
-│                                    dentro do projeto ainda a confirmar/organizar)
+├── test_auth.py                   # 21 testes automatizados de auth.py
 ├── requirements.txt
+├── data/
+│   ├── credentials.json            # NUNCA versionar -- hash+salt da senha personalizada
+│   └── config.json                  # NUNCA versionar -- calibração salva pela GUI
 └── assets/
-    └── template_partida_encontrada.png   # VOCÊ precisa criar este arquivo
+    └── template_partida_encontrada.png   # gerado pela tela de Calibração (ou manualmente)
 ```
 
 ## Identidade visual
@@ -60,27 +63,43 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Passo 2 — Calibrar a região de captura e o template (OBRIGATÓRIO)
+## Passo 2 — Calibrar (pela GUI, recomendado)
 
-O código não funciona sem isso. Você precisa:
+O código não funciona sem isso. Rode `python main.py`, abra
+**Configurações → 🎯 Calibração** e siga o fluxo:
 
-1. Tirar um print da tela exata do momento "Partida Encontrada" no Overwatch.
-2. Recortar a região onde aparece o texto/ícone característico (algo pequeno
-   e estável, não a tela inteira — quanto menor a região, mais rápido e
-   mais robusto o match).
-3. Salvar esse recorte em `assets/template_partida_encontrada.png`.
-4. Rodar `calibrar_regiao.py` (ou editar `config.py` → `REGIAO_CAPTURA`
-   manualmente com as coordenadas exatas, em pixels).
+1. Escolha o monitor onde o Overwatch está rodando.
+2. Clique em **"Capturar e ajustar"** — tira um print daquele monitor.
+3. Arraste um retângulo sobre o texto/ícone de "Partida Encontrada".
+4. Clique em **"Salvar recorte"**.
 
-   > `calibrar_regiao.py` usa `sct.monitors[2]` de forma fixa no código —
-   > se você tiver um setup de monitor diferente, ajuste esse índice antes
-   > de rodar. `listar_monitores.py` ajuda a identificar qual índice usar.
+Esse único gesto já salva a região de captura **e** o template ao
+mesmo tempo — não precisa rodar duas partidas nem editar coordenadas
+na mão. A região salva já vale pro próximo "Iniciar" sem precisar
+reabrir o app, e pode ser refeita quantas vezes quiser (o jogo mudou
+de resolução, você trocou de monitor, etc.) sem reinstalar nada.
 
-Se `REGIAO_CAPTURA` não bater com onde o template realmente aparece, o
-match nunca vai disparar — não existe "quase certo" aqui.
+> **Nota técnica:** a região de captura salva é sempre um pouco maior
+> que o recorte exato (margem de ~20px ao redor). Isso dá espaço pro
+> algoritmo de matching (`cv2.matchTemplate`) "deslizar" e achar o
+> melhor alinhamento — sem essa margem, qualquer diferença de 1 pixel
+> entre o instante da calibração e uma partida real derruba a
+> confiança do match.
 
-Use `teste_matching.py` para validar o matching isoladamente, sem precisar
-subir a GUI inteira.
+### Alternativa (legado): calibrar por fora da GUI
+
+Os scripts `calibrar_regiao.py`, `listar_monitores.py` e
+`teste_matching.py` continuam funcionando pra quem preferir calibrar
+manualmente fora da interface. Nesse fluxo:
+
+1. Tire um print da tela exata do momento "Partida Encontrada".
+2. Recorte a região onde aparece o texto/ícone (pequeno e estável).
+3. Salve em `assets/template_partida_encontrada.png`.
+4. Rode `calibrar_regiao.py` (ajuste `sct.monitors[2]` hardcoded nele
+   se seu setup de monitores for diferente) ou edite `config.py` →
+   `REGIAO_CAPTURA` manualmente.
+
+Use `teste_matching.py` para validar o matching isoladamente.
 
 ## Passo 3 — Rodar
 
@@ -88,66 +107,80 @@ subir a GUI inteira.
 python main.py
 ```
 
-Na tela principal, clique em "Iniciar Monitoramento". A janela mostra:
+O servidor WebSocket sobe **assim que o app abre** (não só ao clicar
+Iniciar) — isso é intencional: é esse momento que faz o Windows
+Firewall perguntar se pode liberar a porta, e queremos essa pergunta
+acontecendo de forma previsível na abertura do app, não em um momento
+variável dependendo de já ter calibrado ou não. **Na primeira
+execução em uma máquina, aceite a permissão do Firewall** — sem isso
+o celular nunca vai conseguir se conectar.
 
-- Seu IP local e um QR Code com a URL do WebSocket (`ws://SEU_IP:PORTA/ws?token=...`)
-  — usado pelo app Android pra conectar.
-- **Status de conexão em tempo real** (Servidor + Celular).
-- Botão **"Testar alarme"**, habilitado enquanto o monitoramento está ativo,
-  pra disparar um alarme manualmente sem esperar uma partida real.
+Na tela principal:
 
-A navegação (Principal → Configurações → Diagnóstico/Histórico) acontece
-dentro da mesma janela, cada tela com um botão "← Voltar".
+- **QR Code e IP local**, prontos assim que o app abre.
+- **Botão "Iniciar"** — liga só a captura de tela/matching (o
+  servidor já está de pé desde a abertura). Antes de calibrar, dá erro
+  "Erro no Template" — calibre primeiro.
+- **Botão "Testar alarme"** — disponível assim que o app abre, não
+  depende de estar monitorando.
+- **Status de conexão em tempo real** (Servidor + Celular), com
+  bolinha colorida por estado (verde/cinza/preta) e atualização
+  instantânea.
+- **Botão 🔄** ao lado do status do celular — força uma verificação
+  ativa e imediata da conexão (manda um ping e espera confirmação),
+  em vez de esperar o ciclo passivo de detecção (~30-45s).
 
 ## Autenticação
 
 O WebSocket exige autenticação antes de aceitar a conexão:
 
-- **Token de sessão**: gerado automaticamente a cada início do programa
-  (em memória, via `secrets`), embutido no QR Code.
-- **Senha personalizada (opcional)**: configurável na tela de Configurações,
-  persistida como hash+salt (PBKDF2).
-- As duas credenciais funcionam simultaneamente — nenhuma tem prioridade
-  sobre a outra.
-- **Rate limiting por IP** contra força bruta: bloqueia após tentativas
-  erradas repetidas, com dois caminhos de desbloqueio — reiniciar o
-  programa, ou aguardar o tempo de bloqueio expirar sozinho. Ambos
-  testados sob carga real.
+- **Token de sessão**: gerado automaticamente a cada início do
+  programa (em memória, via `secrets`), embutido no QR Code.
+- **Senha personalizada (opcional)**: configurável na tela de
+  Configurações, persistida como hash+salt (PBKDF2) em
+  `data/credentials.json`.
+- As duas credenciais funcionam simultaneamente — nenhuma tem
+  prioridade sobre a outra.
+- **Ao salvar uma senha nova**, qualquer celular já conectado é
+  desconectado automaticamente na hora — evita sessões antigas
+  ficarem "penduradas" com a credencial antiga.
+- **Rate limiting por IP** contra força bruta: bloqueia após 5
+  tentativas erradas em 60 segundos, por 5 minutos. Se o celular
+  ficar tentando reconectar sozinho com uma senha errada (ex.: você
+  trocou a senha e esqueceu de atualizar no celular), pode acionar
+  esse bloqueio — nesse caso, espere o tempo de bloqueio expirar antes
+  de tentar de novo com a senha certa.
+
+## Robustez de conexão
+
+Detectar que um celular desconectou não é trivial em WebSocket — o
+TCP nem sempre avisa quando o outro lado sumiu (Wi-Fi caiu, app
+morto à força, etc.). O sistema trata isso em duas camadas:
+
+1. **Passiva**: se uma conexão fica 15s em silêncio, o servidor manda
+   um ping; sem resposta depois de 2 tentativas (~30-45s no total), a
+   conexão é considerada morta e removida.
+2. **Ativa**: o botão 🔄 força essa checagem na hora, sem esperar o
+   ciclo passivo.
+3. **No app Android**: qualquer edição nos campos de IP/Senha, estando
+   conectado, já desconecta a sessão atual imediatamente — evita
+   ambiguidade entre "o que a tela mostra" e "o que está realmente
+   conectado".
 
 ## Diagnóstico
 
 Tela dedicada com checks automáticos: servidor, IP, porta, celular
-conectado, e confirmação de que o alarme foi de fato tocado no celular
-(via a resposta JSON que o app manda de volta) — não apenas que o
-comando foi enviado.
+conectado, e confirmação de que o alarme foi de fato tocado no
+celular (via a resposta JSON que o app manda de volta) — não apenas
+que o comando foi enviado.
 
 ## Histórico
 
-Tela de log com os últimos 50 eventos (em memória, sem persistência em
-disco — reseta ao fechar o programa): servidor iniciado/parado, celular
-conectado/desconectado, partida encontrada (alarme real), teste de
-alarme enviado, e confirmação de alarme tocado recebida do celular.
-Botão "Limpar histórico" disponível.
-
-## Testando o servidor sem o app mobile
-
-Com o monitoramento rodando, dá pra testar o WebSocket manualmente
-(ajuste a URL para incluir o token de sessão ou a senha configurada):
-
-```bash
-pip install websockets
-python -c "
-import asyncio, websockets
-
-async def testar():
-    async with websockets.connect('ws://localhost:PORTA/ws?token=SEU_TOKEN') as ws:
-        print('Conectado. Aguardando PARTIDA_ENCONTRADA...')
-        msg = await ws.recv()
-        print('Recebido:', msg)
-
-asyncio.run(testar())
-"
-```
+Tela de log com os últimos 50 eventos (em memória, sem persistência
+em disco — reseta ao fechar o programa): servidor iniciado/parado,
+celular conectado/desconectado, partida encontrada (alarme real),
+teste de alarme enviado, confirmação de alarme tocado. Botão "Limpar
+histórico" disponível.
 
 ---
 
@@ -164,28 +197,37 @@ Pacote `com.henrique.owalarm`. Principais características:
 - Ao tocar o alarme de verdade, envia de volta uma **confirmação em
   JSON** pro servidor — é essa confirmação que alimenta o Diagnóstico
   e o Histórico no PC.
+- Responde a pings de verificação do PC com um pong, permitindo
+  checagem ativa de conexão sem esperar timeout.
+- **Fecha qualquer conexão anterior antes de abrir uma nova** — evita
+  conexões "zumbi" (órfãs) do lado do servidor quando o usuário aperta
+  Conectar de novo (ex.: com senha diferente).
+- **Desconecta automaticamente se os campos de IP/Senha forem
+  editados enquanto conectado** — evita ambiguidade sobre qual
+  credencial está realmente em uso.
 - Identidade visual espelhada da do PC (mesma paleta, mesma hierarquia
-  de cor).
-
-> A barra de status/action bar do Android (`themes.xml` /
-> `AndroidManifest.xml`) ainda não foi ajustada visualmente — item em
-> aberto.
+  de cor) — inclusive status bar e navigation bar do Android pintadas
+  com a mesma cor de fundo do app.
 
 ---
 
 ## Débitos técnicos conhecidos / pontos em aberto
 
 - Template matching quebra se você mudar resolução/escala do jogo —
-  vai precisar recapturar o template.
+  vai precisar recalibrar (Configurações → Calibração resolve isso
+  sem reinstalar nada).
 - `THRESHOLD = 0.85` é um ponto de partida, não um valor definitivo —
   ajuste observando falsos positivos/negativos nos seus testes reais.
 - Localização final de `test_auth.py` dentro da estrutura do projeto
   (raiz vs. pasta `tests/`) ainda não foi decidida.
 - Sem testes automatizados para `server.py` (decisão deliberada, por
   enquanto considerado desnecessário).
-- Tema da barra de status/action bar do Android ainda não tocado.
-- Instalador Windows (`.exe`) ainda não iniciado.
+- Instalador Windows (`.exe` empacotado com instalador de verdade,
+  tipo Inno Setup) ainda não iniciado — hoje o build é só
+  `pyinstaller --onefile --windowed --add-data "assets;assets" main.py`,
+  sem instalador com atalho/ícone/liberação automática de firewall.
 - Sistema de versionamento (ex.: `v1.0.0`, releases no GitHub) ainda
   não iniciado.
-- Arquivo `_gitignore` no repositório real precisa ser renomeado para
-  `.gitignore`.
+- Na primeira execução de um `.exe` novo (build diferente do
+  anterior), o Windows Firewall pede permissão de novo — isso é
+  esperado e documentado, não é bug.

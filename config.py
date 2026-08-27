@@ -12,6 +12,28 @@ REGIAO_CAPTURA = {
     "height": 150,
 }
 
+# Se o usuário já calibrou pela tela de Calibração da GUI, esse valor
+# sobrescreve o placeholder acima. Import atrasado (dentro da função,
+# não no topo do arquivo) pra evitar import circular -- calibracao.py
+# não depende de config.py, mas outros módulos que importam config.py
+# cedo no processo de inicialização não podem esperar por calibracao.py
+# ainda não estar totalmente carregado.
+def _aplicar_calibracao_salva():
+    global REGIAO_CAPTURA
+    try:
+        from calibracao import carregar_regiao_salva
+        regiao_salva = carregar_regiao_salva()
+        if regiao_salva:
+            REGIAO_CAPTURA = regiao_salva
+    except Exception:
+        # Se calibracao.py falhar por qualquer motivo (arquivo
+        # corrompido, etc.), cai de volta pro placeholder acima em vez
+        # de travar o app inteiro na inicialização.
+        pass
+
+
+_aplicar_calibracao_salva()
+
 # Caminho do template (recorte da tela "Partida Encontrada" em escala de cinza).
 TEMPLATE_PATH = "assets/template_partida_encontrada.png"
 
