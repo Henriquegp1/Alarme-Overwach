@@ -148,6 +148,22 @@ python -m pytest -q
 python main.py
 ```
 
+## Downloads
+
+As versões prontas para instalação ficam na página de Releases do GitHub:
+
+https://github.com/Henriquegp1/App-Alarme/releases
+
+Na release desejada:
+
+- Usuários do Windows devem baixar `TalonMatchAlarm-Setup-VERSAO.exe`.
+- Usuários do Android devem baixar o APK de release publicado, por exemplo
+  `app-release.apk`.
+
+O instalador do Windows configura o programa, cria os atalhos e a regra
+necessária do Firewall. O APK instala o aplicativo no celular. Não é
+necessário baixar o código-fonte, a pasta `build` ou arquivos de debug.
+
 O servidor WebSocket sobe **assim que o app abre** (não só ao clicar
 Iniciar) — isso é intencional: é esse momento que faz o Windows
 Firewall perguntar se pode liberar a porta, e queremos essa pergunta
