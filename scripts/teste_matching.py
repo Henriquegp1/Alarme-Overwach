@@ -6,7 +6,7 @@
 #
 # Uso: com o jogo aberto (ou uma imagem estática na tela que simule a
 # tela de partida encontrada), rode:
-#     python teste_matching.py
+#     python -m scripts.teste_matching
 
 import cv2
 import mss
@@ -25,7 +25,7 @@ print(f"Região de captura configurada: {REGIAO_CAPTURA}")
 print(f"Threshold: {THRESHOLD}")
 print("Capturando 1 frame da região configurada...\n")
 
-with mss.mss() as sct:
+with mss.MSS() as sct:
     frame = np.array(sct.grab(REGIAO_CAPTURA))
     frame_cinza = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
 

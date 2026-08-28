@@ -30,17 +30,27 @@ overwatch_alarm_pc/
 ├── config.py                # constantes ajustáveis + leitura da calibração salva
 ├── theme.py                  # paleta de cores e identidade visual centralizada
 ├── utils.py                   # descoberta de IP local
-├── calibrar_regiao.py          # (legado) gera REGIAO_CAPTURA e template por fora da GUI
-├── listar_monitores.py          # (legado) lista monitores disponíveis por fora da GUI
-├── teste_matching.py             # testa o template matching isoladamente
-├── test_auth.py                   # 21 testes automatizados de auth.py
+├── scripts/                      # ferramentas manuais/legadas
+│   ├── __init__.py               # permite executar scripts como módulo
+│   ├── calibrar_regiao.py        # gera região e template fora da GUI
+│   ├── listar_monitores.py       # lista monitores disponíveis
+│   └── teste_matching.py         # testa o template matching
+├── tests/                        # testes automatizados
+│   ├── test_auth.py              # testes de auth.py
+│   ├── test_config.py            # testes da persistência
+│   └── test_server.py            # testes do servidor WebSocket
+├── version.py                     # versão única do aplicativo
+├── build_release.ps1              # build do executável e instalador
 ├── requirements.txt
-├── data/
-│   ├── credentials.json            # NUNCA versionar -- hash+salt da senha personalizada
-│   └── config.json                  # NUNCA versionar -- calibração salva pela GUI
+├── requirements-dev.txt           # dependências extras para testes
+├── installer/
+│   └── TalonMatchAlarm.iss         # script do instalador Inno Setup
 └── assets/
     └── template_partida_encontrada.png   # gerado pela tela de Calibração (ou manualmente)
 ```
+
+Os arquivos graváveis não ficam mais na árvore do projeto: no Windows,
+eles são mantidos em `%APPDATA%\OwAlarm` (ver a seção abaixo).
 
 ## Identidade visual
 
@@ -62,6 +72,31 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+Para preparar também o ambiente de testes, instale as dependências de
+desenvolvimento:
+
+```powershell
+pip install -r requirements-dev.txt
+```
+
+### Onde ficam os dados salvos
+
+No Windows, as configurações, credenciais e o template calibrado ficam
+em `%APPDATA%\OwAlarm`. Isso é separado do executável porque esses
+arquivos precisam ser graváveis e continuar existindo quando uma nova
+versão do `.exe` for instalada. Na primeira execução, os arquivos
+antigos encontrados na pasta do projeto são migrados automaticamente.
+
+Os arquivos dentro de `assets/` são recursos do programa; o template
+usado pelo monitor é uma cópia persistente em `%APPDATA%\OwAlarm`, por
+isso uma nova calibração não é perdida nem tenta alterar o conteúdo
+interno do `.exe`.
+
+As configurações, credenciais e calibrações são gravadas de forma
+atômica: o sistema termina de escrever um arquivo temporário e só
+depois substitui o arquivo anterior. Assim, uma queda de energia ou
+encerramento forçado não costuma deixar um JSON pela metade.
 
 ## Passo 2 — Calibrar (pela GUI, recomendado)
 
@@ -88,18 +123,24 @@ de resolução, você trocou de monitor, etc.) sem reinstalar nada.
 
 ### Alternativa (legado): calibrar por fora da GUI
 
-Os scripts `calibrar_regiao.py`, `listar_monitores.py` e
-`teste_matching.py` continuam funcionando pra quem preferir calibrar
+Os scripts `scripts/calibrar_regiao.py`, `scripts/listar_monitores.py`
+e `scripts/teste_matching.py` continuam funcionando pra quem preferir calibrar
 manualmente fora da interface. Nesse fluxo:
 
-1. Tire um print da tela exata do momento "Partida Encontrada".
-2. Recorte a região onde aparece o texto/ícone (pequeno e estável).
-3. Salve em `assets/template_partida_encontrada.png`.
-4. Rode `calibrar_regiao.py` (ajuste `sct.monitors[2]` hardcoded nele
-   se seu setup de monitores for diferente) ou edite `config.py` →
-   `REGIAO_CAPTURA` manualmente.
+1. Deixe o jogo na tela exata do momento "Partida Encontrada".
+2. Rode `python -m scripts.calibrar_regiao`.
+3. Se necessário, altere `INDICE_MONITOR` no script para o monitor
+  correto e execute-o novamente.
+4. Recorte a região onde aparece o texto/ícone; o script salva região
+  e template diretamente em `%APPDATA%\OwAlarm`.
 
-Use `teste_matching.py` para validar o matching isoladamente.
+Use `python -m scripts.teste_matching` para validar o matching isoladamente.
+
+Para executar os testes automatizados:
+
+```powershell
+python -m pytest -q
+```
 
 ## Passo 3 — Rodar
 
@@ -130,15 +171,48 @@ Na tela principal:
   ativa e imediata da conexão (manda um ping e espera confirmação),
   em vez de esperar o ciclo passivo de detecção (~30-45s).
 
+## Gerar o instalador Windows
+
+O executável e o instalador são gerados em duas etapas. Com a venv
+ativada, rode:
+
+```powershell
+python -m PyInstaller TalonMatchAlarm.spec
+iscc installer\TalonMatchAlarm.iss
+```
+
+Para gerar uma release usando a versão de `version.py`, use:
+
+```powershell
+.\build_release.ps1
+```
+
+Antes de publicar, altere somente `VERSAO` em `version.py` seguindo o
+formato `MAJOR.MINOR.PATCH` (por exemplo, `1.1.0`). O script repassa o
+mesmo valor para o instalador e o aplicativo o mostra no título da
+janela.
+
+O executável fica em `dist/TalonMatchAlarm.exe` e o instalador em
+`releases/`. O script do Inno Setup cria atalhos, registra a
+desinstalação e libera a porta TCP 8000 somente no perfil de rede
+privado do Windows. O instalador precisa ser executado como
+administrador para criar essa regra de firewall.
+
+Os dados do usuário continuam em `%APPDATA%\OwAlarm`; desinstalar ou
+atualizar o programa não apaga calibração, senha ou template.
+
 ## Autenticação
 
 O WebSocket exige autenticação antes de aceitar a conexão:
 
 - **Token de sessão**: gerado automaticamente a cada início do
   programa (em memória, via `secrets`), embutido no QR Code.
+- **Ao gerar um novo token**, qualquer celular já conectado é
+  desconectado imediatamente; é preciso conectar novamente usando o
+  QR Code ou código atualizado.
 - **Senha personalizada (opcional)**: configurável na tela de
   Configurações, persistida como hash+salt (PBKDF2) em
-  `data/credentials.json`.
+  `%APPDATA%\OwAlarm\credentials.json`.
 - As duas credenciais funcionam simultaneamente — nenhuma tem
   prioridade sobre a outra.
 - **Ao salvar uma senha nova**, qualquer celular já conectado é
@@ -167,6 +241,11 @@ morto à força, etc.). O sistema trata isso em duas camadas:
    ambiguidade entre "o que a tela mostra" e "o que está realmente
    conectado".
 
+O aviso de partida é agendado pela thread de captura, mas a lista de
+celulares é consultada somente dentro do event loop do servidor. Isso
+evita uma condição de corrida em que o celular poderia desconectar
+entre a verificação e o envio do alarme.
+
 ## Diagnóstico
 
 Tela dedicada com checks automáticos: servidor, IP, porta, celular
@@ -181,6 +260,18 @@ em disco — reseta ao fechar o programa): servidor iniciado/parado,
 celular conectado/desconectado, partida encontrada (alarme real),
 teste de alarme enviado, confirmação de alarme tocado. Botão "Limpar
 histórico" disponível.
+
+## Validação prática
+
+O fluxo completo foi validado em uso real:
+
+- conexão entre o PC e o celular;
+- teste manual do alarme;
+- calibração da região de captura;
+- detecção de uma partida real na tela.
+
+Além disso, a suíte automatizada cobre autenticação, servidor WebSocket,
+persistência de configurações e gravação atômica dos arquivos.
 
 ---
 
@@ -216,18 +307,23 @@ Pacote `com.henrique.owalarm`. Principais características:
 - Template matching quebra se você mudar resolução/escala do jogo —
   vai precisar recalibrar (Configurações → Calibração resolve isso
   sem reinstalar nada).
-- `THRESHOLD = 0.85` é um ponto de partida, não um valor definitivo —
+- `THRESHOLD = 0.80` é um ponto de partida, não um valor definitivo —
   ajuste observando falsos positivos/negativos nos seus testes reais.
-- Localização final de `test_auth.py` dentro da estrutura do projeto
-  (raiz vs. pasta `tests/`) ainda não foi decidida.
-- Sem testes automatizados para `server.py` (decisão deliberada, por
-  enquanto considerado desnecessário).
-- Instalador Windows (`.exe` empacotado com instalador de verdade,
-  tipo Inno Setup) ainda não iniciado — hoje o build é só
-  `pyinstaller --onefile --windowed --add-data "assets;assets" main.py`,
-  sem instalador com atalho/ícone/liberação automática de firewall.
-- Sistema de versionamento (ex.: `v1.0.0`, releases no GitHub) ainda
-  não iniciado.
+- Ao fechar o programa, o monitor de tela e o servidor são sinalizados
+  e aguardados por até 2 segundos antes da janela ser destruída. Isso
+  evita threads continuarem executando callbacks depois do encerramento
+  da interface.
+- Os testes ficam em `tests/` e os scripts auxiliares em `scripts/`,
+  separando código de produção, testes e ferramentas manuais. A suíte
+  cobre autenticação, servidor WebSocket e persistência de dados.
+- Os instaladores gerados ficam em `releases/`, separados por versão.
+  Essa pasta está no `.gitignore` para não misturar binários pesados
+  com o código-fonte; guarde cópias em um local de releases ou backup.
+- O Inno Setup precisa estar instalado para compilar
+  `installer/TalonMatchAlarm.iss`; o compilador `iscc` não faz parte do
+  ambiente Python do projeto.
+- O versionamento usa `version.py`; ainda falta definir o processo de
+  publicação das releases e respectivas tags no GitHub.
 - Na primeira execução de um `.exe` novo (build diferente do
   anterior), o Windows Firewall pede permissão de novo — isso é
   esperado e documentado, não é bug.

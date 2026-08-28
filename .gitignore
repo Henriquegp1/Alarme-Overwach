@@ -17,6 +17,7 @@ ENV/
 # Credenciais e dados locais
 credentials.json
 data/credentials.json
+data/*.json
 
 # IDEs
 .vscode/
@@ -38,6 +39,7 @@ logs/
 # Builds / distribuição
 build/
 dist/
+releases/
 
 # Cache de ferramentas
 .pytest_cache/
@@ -47,3 +49,4 @@ dist/
 # Arquivos de debug
 debug/
 debug_capura_atual.png
+debug_captura_atual.png

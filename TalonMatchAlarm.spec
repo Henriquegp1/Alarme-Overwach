@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 
-a = Analysis(
+analysis = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
@@ -14,15 +14,15 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-pyz = PYZ(a.pure)
+pyz = PYZ(analysis.pure)
 
 exe = EXE(
     pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
+    analysis.scripts,
+    analysis.binaries,
+    analysis.datas,
     [],
-    name='main',
+    name='TalonMatchAlarm',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets/logo_talon.ico'],
 )

@@ -21,6 +21,9 @@ from config import (
     REGIAO_CAPTURA,
     TEMPLATE_PATH,
     THRESHOLD,
+    salvar_threshold,
+    carregar_threshold,
+    recurso_path,
 )
 from monitor import MonitorPartida
 from server import (
@@ -30,8 +33,10 @@ from server import (
     notificar_partida_encontrada,
     verificar_conexoes_agora,
     desconectar_todos_por_troca_de_senha,
+    desconectar_todos_por_reautenticacao,
 )
 from utils import obter_ip_local
+from version import VERSAO
 
 theme.aplicar_modo()
 
@@ -53,13 +58,14 @@ class App(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        self.title("Overwatch Match Alarm")
+        self.title(f"Overwatch Match Alarm v{VERSAO}")
         self.geometry("400x600")  # placeholder -- recalculado a cada troca de tela
-        self.resizable(False, False)
+        self.minsize(320, 420)
+        self.resizable(True, True)
         self.configure(fg_color=theme.BG_APP)
 
         try:
-            self.iconbitmap("assets/icone_ow.ico")
+            self.iconbitmap(recurso_path("assets/logo_talon.ico"))
         except Exception:
             pass  # não trava o app se o ícone não existir nessa máquina
 
@@ -67,7 +73,8 @@ class App(ctk.CTk):
         self._monitor: MonitorPartida | None = None
         self._celular_conectado = False
         self._eventos: list[tuple[str, str, str]] = []  # (hora, texto, cor) -- só em memória
-        self._logo_img = self._carregar_logo("assets/logo_ow.png", size=(40, 40))
+        self._threshold = carregar_threshold()
+        self._logo_img = self._carregar_logo(recurso_path("assets/logo_talon.png"), size=(56, 56))
 
         # Região efetiva usada ao iniciar o monitoramento. Começa com o
         # valor que config.py já resolveu (calibração salva ou
@@ -87,6 +94,7 @@ class App(ctk.CTk):
         self._captura_photoimage = None      # referência viva -- Tkinter descarta a imagem sem isso
 
         self.tela_principal = ctk.CTkFrame(self, fg_color=theme.BG_APP)
+        self.tela_inicial = ctk.CTkFrame(self, fg_color=theme.BG_APP)
         self.tela_configuracoes = ctk.CTkFrame(self, fg_color=theme.BG_APP)
         self.tela_diagnostico = ctk.CTkFrame(self, fg_color=theme.BG_APP)
         self.tela_historico = ctk.CTkFrame(self, fg_color=theme.BG_APP)
@@ -99,14 +107,16 @@ class App(ctk.CTk):
         self._construir_tela_calibracao(self.tela_calibracao)
 
         self.protocol("WM_DELETE_WINDOW", self._ao_fechar)
-        self._mostrar_tela(self.tela_principal)
+        self._construir_tela_inicial(self.tela_inicial)
+        self._mostrar_tela(self.tela_inicial)
+        self.after(1800, lambda: self._mostrar_tela(self.tela_principal))
         self._iniciar_servidor()
 
     # ------------------------------------------------------------------
     # Navegação entre telas
     # ------------------------------------------------------------------
     def _mostrar_tela(self, tela: ctk.CTkFrame, ao_entrar=None):
-        for t in (self.tela_principal, self.tela_configuracoes, self.tela_diagnostico, self.tela_historico, self.tela_calibracao):
+        for t in (self.tela_inicial, self.tela_principal, self.tela_configuracoes, self.tela_diagnostico, self.tela_historico, self.tela_calibracao):
             t.pack_forget()
         tela.pack(fill="both", expand=True)
         if ao_entrar is not None:
@@ -117,7 +127,8 @@ class App(ctk.CTk):
         # adicionado no futuro (foi exatamente o bug do rodapé sumindo
         # antes); medir de verdade a cada troca não desatualiza nunca.
         self.update_idletasks()
-        self.geometry(f"400x{tela.winfo_reqheight()}")
+        largura = max(400, tela.winfo_reqwidth())
+        self.geometry(f"{largura}x{tela.winfo_reqheight()}")
 
     def _cabecalho_com_voltar(self, parent, titulo: str, ao_voltar):
         """Cabeçalho padrão das telas secundárias: '← Voltar' + título."""
@@ -142,10 +153,31 @@ class App(ctk.CTk):
     # ==================================================================
     # TELA PRINCIPAL
     # ==================================================================
+    def _construir_tela_inicial(self, tela):
+        frame_marca = ctk.CTkFrame(tela, fg_color="transparent")
+        frame_marca.pack(pady=(90, 18), padx=20)
+
+        self._splash_logo_img = self._carregar_logo(
+            recurso_path("assets/logo_talon.png"), size=(150, 150),
+        )
+        if self._splash_logo_img is not None:
+            ctk.CTkLabel(frame_marca, image=self._splash_logo_img, text="").pack(side="left", padx=(0, 14))
+
+        frame_texto = ctk.CTkFrame(frame_marca, fg_color="transparent")
+        frame_texto.pack(side="left")
+        ctk.CTkLabel(
+            frame_texto, text="MATCH ALARM", font=theme.font_marca(24),
+            text_color=theme.TEXT_PRIMARY,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            frame_texto, text="OVERWATCH", font=theme.font_corpo_bold(12),
+            text_color=theme.BLUE,
+        ).pack(anchor="w", pady=(4, 0))
+
     def _construir_tela_principal(self, tela):
         # ----- Cabeçalho / marca -----
         frame_header = ctk.CTkFrame(tela, fg_color="transparent")
-        frame_header.pack(pady=(24, 4), padx=20, fill="x")
+        frame_header.pack(pady=(18, 4), padx=20, fill="x")
 
         if self._logo_img is not None:
             ctk.CTkLabel(frame_header, image=self._logo_img, text="").pack(side="left", padx=(0, 10))
@@ -162,6 +194,14 @@ class App(ctk.CTk):
             hover_color=theme.GRAY_BTN, text_color=theme.TEXT_MUTED,
             font=theme.font_titulo(16), corner_radius=8,
         ).pack(side="right", anchor="n")
+
+        ctk.CTkButton(
+            frame_header, text="⛶", command=self._alternar_maximizado,
+            width=36, height=36, fg_color="transparent",
+            border_width=1, border_color=theme.BORDER_CARD,
+            hover_color=theme.GRAY_BTN, text_color=theme.TEXT_MUTED,
+            font=theme.font_titulo(16), corner_radius=8,
+        ).pack(side="right", anchor="n", padx=(0, 6))
 
         ctk.CTkLabel(
             frame_titulo, text="MATCH ALARM",
@@ -289,6 +329,14 @@ class App(ctk.CTk):
         )
         self.label_token.pack(pady=(10, 4))
 
+        self.btn_ocultar_qr = ctk.CTkButton(
+            self.frame_conexao, text="Ocultar QR Code", command=self._alternar_qr,
+            width=160, height=30, fg_color=theme.GRAY_BTN,
+            hover_color=theme.GRAY_BTN_HOVER, text_color=theme.TEXT_PRIMARY,
+            font=theme.font_corpo_bold(12), corner_radius=8,
+        )
+        self.btn_ocultar_qr.pack(pady=(0, 8))
+
         frame_token_botoes = ctk.CTkFrame(self.frame_conexao, fg_color="transparent")
         frame_token_botoes.pack(pady=(2, 18))
 
@@ -351,6 +399,7 @@ class App(ctk.CTk):
         """Só chamado ao fechar o app -- ver _ao_fechar."""
         if self._servidor:
             self._servidor.parar()
+            self._servidor = None
         auth.invalidar_token_sessao()
         definir_callback_conexao(None)
         definir_callback_confirmacao(None)
@@ -365,10 +414,11 @@ class App(ctk.CTk):
             self._monitor = MonitorPartida(
                 regiao=self._regiao_atual,
                 template_path=TEMPLATE_PATH,
-                threshold=THRESHOLD,
+                threshold=self._threshold,
                 intervalo=INTERVALO_CAPTURA,
                 cooldown=COOLDOWN_APOS_MATCH,
                 on_match=self._on_match,
+                on_near_match=self._on_near_match,
             )
         except FileNotFoundError:
             self.label_status.configure(text="● Erro no Template", text_color=theme.RED_DANGER)
@@ -390,6 +440,7 @@ class App(ctk.CTk):
 
         if self._monitor:
             self._monitor.parar()
+            self._monitor = None
 
         self.label_status.configure(text="● Pronto para iniciar", text_color=theme.BLUE)
         if estava_rodando:
@@ -427,6 +478,15 @@ class App(ctk.CTk):
             self._registrar_evento("🔔 Partida encontrada — alarme disparado", theme.YELLOW_ALERT)
 
         self.after(0, atualizar)
+
+    def _on_near_match(self, confianca: float):
+        """Registra uma detecção próxima do limite sem disparar alarme."""
+        self.after(
+            0,
+            lambda: self._registrar_evento(
+                f"Quase partida encontrada ({confianca:.0%})", theme.YELLOW_ALERT,
+            ),
+        )
 
     def _verificar_conexao_agora(self):
         """Chamado pelo botão 🔄 -- força uma checagem imediata em vez
@@ -484,12 +544,24 @@ class App(ctk.CTk):
 
     def _regenerar_token(self):
         auth.gerar_novo_token()
+        desconectar_todos_por_reautenticacao()
         self._atualizar_conexao()
 
     def _gerar_qrcode(self, dado: str):
         img = qrcode.make(dado).convert("RGB")
         ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(200, 200))
         self.label_qr.configure(image=ctk_img, text="")
+
+    def _alternar_qr(self):
+        if self.frame_qr_moldura.winfo_manager():
+            self.frame_qr_moldura.pack_forget()
+            self.btn_ocultar_qr.configure(text="Mostrar QR Code")
+        else:
+            self.frame_qr_moldura.pack(pady=6, before=self.label_token)
+            self.btn_ocultar_qr.configure(text="Ocultar QR Code")
+
+    def _alternar_maximizado(self):
+        self.state("normal" if self.state() == "zoomed" else "zoomed")
 
     def _registrar_evento(self, texto: str, cor: str | None = None):
         """
@@ -601,6 +673,37 @@ class App(ctk.CTk):
             text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(13),
             corner_radius=8,
         ).pack(padx=16, pady=(16, 8))
+
+        card_confianca = ctk.CTkFrame(
+            tela, fg_color=theme.BG_CARD, corner_radius=14,
+            border_width=1, border_color=theme.BORDER_CARD,
+        )
+        card_confianca.pack(padx=24, pady=(16, 0), fill="x")
+
+        ctk.CTkLabel(
+            card_confianca, text="Confiança da detecção",
+            font=theme.font_corpo_bold(13), text_color=theme.TEXT_PRIMARY,
+        ).pack(pady=(14, 2))
+
+        label_confianca = ctk.CTkLabel(
+            card_confianca, text=f"{self._threshold:.0%}",
+            font=theme.font_titulo(16), text_color=theme.BLUE,
+        )
+        label_confianca.pack(pady=(0, 4))
+
+        def ajustar_confianca(valor):
+            self._threshold = round(float(valor), 2)
+            label_confianca.configure(text=f"{self._threshold:.0%}")
+            salvar_threshold(self._threshold)
+
+        ctk.CTkSlider(
+            card_confianca, from_=0.70, to=0.90, number_of_steps=20,
+            width=260, command=ajustar_confianca,
+            button_color=theme.ORANGE, button_hover_color=theme.ORANGE_HOVER,
+            progress_color=theme.BLUE,
+        ).pack(pady=(0, 14))
+        # O valor inicial do slider deve acompanhar o valor configurado.
+        card_confianca.winfo_children()[-1].set(self._threshold)
 
         ctk.CTkButton(
             card_sistema, text="📋  Histórico de eventos", width=260,

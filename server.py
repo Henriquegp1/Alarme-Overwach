@@ -164,6 +164,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 async def _broadcast_partida_encontrada():
+    if not _conexoes:
+        logger.warning("Partida encontrada, mas nenhum celular está conectado")
+        return
+
     conexoes_mortas = []
     for ws in _conexoes:
         try:
@@ -227,14 +231,18 @@ async def _desconectar_todos():
             pass
 
 
-def desconectar_todos_por_troca_de_senha():
+def desconectar_todos_por_reautenticacao():
     """
-    Ponto de entrada síncrono, chamado pela THREAD DA GUI logo depois de
-    salvar uma senha nova -- mesmo padrão de notificar_partida_encontrada
-    e verificar_conexoes_agora.
+    Ponto de entrada síncrono, chamado pela thread da GUI quando uma
+    credencial que afeta a sessão é alterada.
     """
     if _server_loop is not None:
         asyncio.run_coroutine_threadsafe(_desconectar_todos(), _server_loop)
+
+
+def desconectar_todos_por_troca_de_senha():
+    """Mantém compatibilidade com o nome usado por versões anteriores."""
+    desconectar_todos_por_reautenticacao()
 
 
 def verificar_conexoes_agora():
@@ -252,10 +260,12 @@ def notificar_partida_encontrada():
     Ponto de entrada chamado pela THREAD DE MONITORAMENTO (síncrona).
     Agenda o broadcast assíncrono no event loop do servidor.
     """
-    if _server_loop is not None:
-        asyncio.run_coroutine_threadsafe(
-            _broadcast_partida_encontrada(), _server_loop
-        )
+    if _server_loop is None or not _server_loop.is_running():
+        logger.warning("Partida encontrada, mas o servidor ainda não está pronto")
+        return
+    asyncio.run_coroutine_threadsafe(
+        _broadcast_partida_encontrada(), _server_loop
+    )
 
 
 class ServidorThread(threading.Thread):
@@ -285,8 +295,14 @@ class ServidorThread(threading.Thread):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         _server_loop = loop
-        loop.run_until_complete(self._server.serve())
+        try:
+            loop.run_until_complete(self._server.serve())
+        finally:
+            _server_loop = None
+            loop.close()
 
-    def parar(self):
+    def parar(self, timeout: float = 2.0):
         # Sinaliza para o uvicorn encerrar o serve() de forma graciosa.
         self._server.should_exit = True
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=timeout)

@@ -17,8 +17,9 @@ import os
 import mss
 from PIL import Image
 
-ARQUIVO_CONFIG = "data/config.json"
-TEMPLATE_PATH = "assets/template_partida_encontrada.png"
+from config import ARQUIVO_CONFIG, ARQUIVO_TEMPLATE, salvar_json_atomico
+
+TEMPLATE_PATH = ARQUIVO_TEMPLATE
 
 # Folga (em pixels) adicionada ao redor do recorte exato do usuário na
 # hora de salvar a REGIÃO DE BUSCA (não o template em si -- esse
@@ -47,7 +48,7 @@ def listar_monitores() -> list[dict]:
     ficaria com coordenadas ambíguas), então começamos do índice 1.
     """
     monitores = []
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         for i, mon in enumerate(sct.monitors):
             if i == 0:
                 continue
@@ -62,7 +63,7 @@ def capturar_monitor(indice_monitor: int) -> tuple[Image.Image, dict]:
     dict `monitor` do mss usado (precisa do offset top/left dele depois,
     pra converter coordenadas do recorte em coordenadas absolutas).
     """
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         monitor = sct.monitors[indice_monitor]
         frame = sct.grab(monitor)
         img = Image.frombytes("RGB", frame.size, frame.rgb)
@@ -84,8 +85,8 @@ def salvar_calibracao(monitor: dict, recorte_left: int, recorte_top: int,
     Retorna a região salva (dict top/left/width/height), útil pra
     atualizar o estado da GUI sem precisar reler o arquivo.
     """
-    os.makedirs("data", exist_ok=True)
-    os.makedirs("assets", exist_ok=True)
+    os.makedirs(os.path.dirname(ARQUIVO_CONFIG), exist_ok=True)
+    os.makedirs(os.path.dirname(TEMPLATE_PATH), exist_ok=True)
 
     # A região de BUSCA (o que o mss.grab captura em runtime) é maior
     # que o template -- ver _MARGEM_BUSCA_PX acima. O template salvo
@@ -108,8 +109,7 @@ def salvar_calibracao(monitor: dict, recorte_left: int, recorte_top: int,
     dados = _ler_config_bruta()
     dados["regiao_captura"] = regiao_absoluta
     dados["monitor_index"] = monitor.get("indice")  # informativo, não usado pro grab em si
-    with open(ARQUIVO_CONFIG, "w", encoding="utf-8") as f:
-        json.dump(dados, f, indent=2)
+    salvar_json_atomico(ARQUIVO_CONFIG, dados)
 
     return regiao_absoluta
 

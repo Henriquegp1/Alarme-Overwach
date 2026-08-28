@@ -20,18 +20,26 @@
 # 6. O script imprime a linha pronta para colar em config.py e já
 #    salva o recorte em assets/template_partida_encontrada.png.
 
+import cv2
 import mss
 import numpy as np
-import cv2
+from PIL import Image
 
-with mss.mss() as sct:
+from calibracao import salvar_calibracao
+
+
+INDICE_MONITOR = 2
+
+with mss.MSS() as sct:
     # sct.monitors[0] = todos os monitores combinados
     # sct.monitors[1] = monitor primário
     # Se você joga num monitor secundário, troque o índice aqui.
-    monitor = sct.monitors[2]
-    screenshot = np.array(sct.grab(monitor))
+    monitor = dict(sct.monitors[INDICE_MONITOR])
+    monitor["indice"] = INDICE_MONITOR
+    frame = sct.grab(monitor)
+    screenshot = Image.frombytes("RGB", frame.size, frame.rgb)
 
-frame_bgr = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+frame_bgr = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
 print("Uma janela vai abrir com o print da sua tela.")
 print("Arraste o mouse para desenhar um retangulo ao redor da regiao.")
@@ -45,11 +53,14 @@ cv2.destroyAllWindows()
 if w == 0 or h == 0:
     print("Nenhuma regiao selecionada. Rode o script de novo.")
 else:
-    print("Cole isso no seu config.py, substituindo REGIAO_CAPTURA:\n")
-    print(f'REGIAO_CAPTURA = {{"top": {y}, "left": {x}, "width": {w}, "height": {h}}}\n')
-
-    recorte = frame_bgr[y : y + h, x : x + w]
-    caminho_saida = "assets/template_partida_encontrada.png"
-    cv2.imwrite(caminho_saida, recorte)
-    print(f"Recorte salvo automaticamente em: {caminho_saida}")
-    print("Pronto — nao precisa recortar nada manualmente.")
+    recorte = screenshot.crop((x, y, x + w, y + h))
+    regiao = salvar_calibracao(
+        monitor=monitor,
+        recorte_left=x,
+        recorte_top=y,
+        recorte_width=w,
+        recorte_height=h,
+        imagem_recortada=recorte,
+    )
+    print(f"Calibracao salva em %APPDATA%\\OwAlarm: {regiao}")
+    print("Pronto — nao precisa editar config.py nem copiar arquivos manualmente.")

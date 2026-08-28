@@ -19,6 +19,7 @@ import time
 
 from config import (
     ARQUIVO_CREDENCIAIS,
+    salvar_json_atomico,
     JANELA_TENTATIVAS_AUTH,
     MAX_TENTATIVAS_AUTH,
     TEMPO_BLOQUEIO_AUTH,
@@ -75,8 +76,7 @@ def salvar_senha_personalizada(senha: str):
         "hash": hash_senha.hex(),
         "iteracoes": _ITERACOES_PBKDF2,
     }
-    with open(ARQUIVO_CREDENCIAIS, "w", encoding="utf-8") as f:
-        json.dump(dados, f)
+    salvar_json_atomico(ARQUIVO_CREDENCIAIS, dados)
 
 
 def remover_senha_personalizada():

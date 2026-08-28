@@ -3,11 +3,11 @@
 # Roda isso para descobrir o índice correto do seu monitor antes de
 # editar calibrar_regiao.py e config.py.
 #
-# Uso: python listar_monitores.py
+# Uso: python -m scripts.listar_monitores
 
 import mss
 
-with mss.mss() as sct:
+with mss.MSS() as sct:
     for i, m in enumerate(sct.monitors):
         print(f"Indice {i}: {m}")
 
