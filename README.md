@@ -201,6 +201,40 @@ administrador para criar essa regra de firewall.
 Os dados do usuário continuam em `%APPDATA%\OwAlarm`; desinstalar ou
 atualizar o programa não apaga calibração, senha ou template.
 
+### Atualizar e publicar uma nova versão
+
+Siga estes passos sempre que fizer alterações no projeto:
+
+1. Execute os testes:
+
+  ```powershell
+  .\venv\Scripts\python.exe -m pytest -q
+  ```
+
+2. Altere somente `VERSAO` em `version.py`, usando uma versão maior que a
+  anterior, por exemplo `1.0.0` para `1.0.1`.
+3. Gere o executável e o instalador:
+
+  ```powershell
+  .\build_release.ps1
+  ```
+
+4. Confirme se o novo arquivo `TalonMatchAlarm-Setup-VERSAO.exe` apareceu em
+  `releases/`. Não envie as pastas `build/`, `dist/`, `releases/` ou `venv/`
+  para o GitHub.
+5. Registre e publique as alterações:
+
+  ```powershell
+  git add -A
+  git commit -m "prepara versao VERSAO"
+  git push origin main
+  ```
+
+6. Envie para os usuários o instalador da pasta `releases/`. Eles devem
+  executá-lo sobre a instalação anterior. O mesmo `AppId` faz o Windows
+  reconhecer a instalação como uma atualização, mantendo os dados em
+  `%APPDATA%\OwAlarm`.
+
 ## Autenticação
 
 O WebSocket exige autenticação antes de aceitar a conexão:
