@@ -259,8 +259,9 @@ O WebSocket exige autenticação antes de aceitar a conexão:
   tentativas erradas em 60 segundos, por 5 minutos. Se o celular
   ficar tentando reconectar sozinho com uma senha errada (ex.: você
   trocou a senha e esqueceu de atualizar no celular), pode acionar
-  esse bloqueio — nesse caso, espere o tempo de bloqueio expirar antes
-  de tentar de novo com a senha certa.
+  esse bloqueio — nesse caso, o Histórico registra o bloqueio e o tempo
+  restante. Espere esse período expirar antes de tentar de novo com a
+  senha certa.
 
 ## Robustez de conexão
 

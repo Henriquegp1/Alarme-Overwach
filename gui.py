@@ -30,6 +30,7 @@ from monitor import MonitorPartida
 from server import (
     ServidorThread,
     definir_callback_conexao,
+    definir_callback_evento,
     definir_callback_confirmacao,
     notificar_partida_encontrada,
     verificar_conexoes_agora,
@@ -379,6 +380,7 @@ class App(ctk.CTk):
         auth.gerar_novo_token()
 
         definir_callback_conexao(self._on_conexao_mudou)
+        definir_callback_evento(self._on_evento_servidor)
         definir_callback_confirmacao(self._on_confirmacao_recebida)
 
         self._servidor = ServidorThread(port=PORTA_SERVIDOR)
@@ -404,6 +406,7 @@ class App(ctk.CTk):
             self._servidor = None
         auth.invalidar_token_sessao()
         definir_callback_conexao(None)
+        definir_callback_evento(None)
         definir_callback_confirmacao(None)
 
     # ------------------------------------------------------------------
@@ -548,6 +551,12 @@ class App(ctk.CTk):
         def atualizar():
             self._registrar_evento("✅ Celular confirmou o alarme!", theme.GREEN_OK)
         self.after(0, atualizar)
+
+    def _on_evento_servidor(self, texto: str):
+        self.after(
+            0,
+            lambda: self._registrar_evento(texto, theme.RED_DANGER),
+        )
 
     def _atualizar_conexao(self):
         token = auth.token_sessao_atual()

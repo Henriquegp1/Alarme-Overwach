@@ -192,12 +192,23 @@ def test_bloqueia_apos_atingir_max_tentativas(relogio):
     limiter = _novo_limiter(max_tentativas=3)
     ip = "192.168.0.10"
 
-    limiter.registrar_falha(ip)
-    limiter.registrar_falha(ip)
+    assert limiter.registrar_falha(ip) is False
+    assert limiter.registrar_falha(ip) is False
     assert limiter.ip_bloqueado(ip) is False  # ainda não bateu o limite
 
-    limiter.registrar_falha(ip)  # 3ª falha -- bate o limite
+    assert limiter.registrar_falha(ip) is True  # 3ª falha -- bate o limite
     assert limiter.ip_bloqueado(ip) is True
+
+
+def test_tempo_restante_do_bloqueio_e_informado(relogio):
+    limiter = _novo_limiter(max_tentativas=2, bloqueio=30.0)
+    ip = "192.168.0.10"
+
+    limiter.registrar_falha(ip)
+    limiter.registrar_falha(ip)
+    relogio.avancar(7)
+
+    assert limiter.tempo_bloqueio_restante(ip) == 23.0
 
 
 def test_falhas_fora_da_janela_nao_contam(relogio):

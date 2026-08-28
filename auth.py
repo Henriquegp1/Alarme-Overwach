@@ -163,7 +163,13 @@ class RateLimiter:
             return False
         return True
 
-    def registrar_falha(self, ip: str):
+    def tempo_bloqueio_restante(self, ip: str) -> float:
+        expira_em = self._bloqueados.get(ip)
+        if expira_em is None:
+            return 0.0
+        return max(0.0, expira_em - time.time())
+
+    def registrar_falha(self, ip: str) -> bool:
         agora = time.time()
         historico = self._tentativas.setdefault(ip, [])
         historico.append(agora)
@@ -171,8 +177,10 @@ class RateLimiter:
         # estrutura indefinidamente com o tempo.
         limite = agora - self._janela
         historico[:] = [t for t in historico if t >= limite]
-        if len(historico) >= self._max_tentativas:
+        bloqueou_agora = len(historico) >= self._max_tentativas and ip not in self._bloqueados
+        if bloqueou_agora:
             self._bloqueados[ip] = agora + self._bloqueio
+        return bloqueou_agora
 
     def registrar_sucesso(self, ip: str):
         self._tentativas.pop(ip, None)

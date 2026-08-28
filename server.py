@@ -22,6 +22,7 @@ import asyncio
 import logging
 import threading
 import json
+import math
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
@@ -65,12 +66,22 @@ _server_loop: asyncio.AbstractEventLoop | None = None
 # para a thread principal (ex.: via self.after(0, ...) no CustomTkinter),
 # do mesmo jeito que já é feito com notificar_partida_encontrada.
 _on_conexao_mudou = None
+_callback_evento = None
 
 
 def definir_callback_conexao(callback):
     """Registra (ou remove, passando None) o callback de mudança de conexão."""
     global _on_conexao_mudou
     _on_conexao_mudou = callback
+
+def definir_callback_evento(callback):
+    global _callback_evento
+    _callback_evento = callback
+
+
+def _avisar_evento(texto: str):
+    if _callback_evento is not None:
+        _callback_evento(texto)
 
 def definir_callback_confirmacao(cb):
     global _callback_confirmacao
@@ -104,7 +115,14 @@ async def websocket_endpoint(websocket: WebSocket):
     token = websocket.query_params.get("token")
 
     if not auth.credencial_valida(token):
-        auth.rate_limiter.registrar_falha(ip_cliente)
+        bloqueou_agora = auth.rate_limiter.registrar_falha(ip_cliente)
+        if bloqueou_agora:
+            minutos = max(1, math.ceil(
+                auth.rate_limiter.tempo_bloqueio_restante(ip_cliente) / 60,
+            ))
+            _avisar_evento(
+                f"IP bloqueado por tentativas inválidas - tente novamente em {minutos} min"
+            )
         logger.warning("Tentativa de autenticação inválida. IP: %s", ip_cliente)
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
