@@ -2,6 +2,7 @@
 import datetime
 import socket
 import threading
+import time
 
 import tkinter as tk
 
@@ -72,6 +73,7 @@ class App(ctk.CTk):
         self._servidor: ServidorThread | None = None
         self._monitor: MonitorPartida | None = None
         self._celulares_conectados = 0
+        self._cooldown_ate = 0.0
         self._eventos: list[tuple[str, str, str]] = []  # (hora, texto, cor) -- só em memória
         self._threshold = carregar_threshold()
         self._logo_img = self._carregar_logo(recurso_path("assets/logo_talon.png"), size=(56, 56))
@@ -474,10 +476,21 @@ class App(ctk.CTk):
         notificar_partida_encontrada()
 
         def atualizar():
-            self.label_status.configure(text="● PARTIDA ENCONTRADA!", text_color=theme.YELLOW_ALERT)
+            self._cooldown_ate = time.monotonic() + COOLDOWN_APOS_MATCH
+            self._atualizar_cooldown()
             self._registrar_evento("🔔 Partida encontrada — alarme disparado", theme.YELLOW_ALERT)
 
         self.after(0, atualizar)
+
+    def _atualizar_cooldown(self):
+        restante = max(0.0, self._cooldown_ate - time.monotonic())
+        if restante > 0 and self.btn_parar.cget("state") == "normal":
+            self.label_status.configure(
+                text=f"⏳ Cooldown: {restante:.1f}s", text_color=theme.YELLOW_ALERT,
+            )
+            self.after(100, self._atualizar_cooldown)
+        elif self.btn_parar.cget("state") == "normal":
+            self.label_status.configure(text="● Monitorando...", text_color=theme.GREEN_OK)
 
     def _on_near_match(self, confianca: float):
         """Registra uma detecção próxima do limite sem disparar alarme."""

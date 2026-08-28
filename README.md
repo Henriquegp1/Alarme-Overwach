@@ -171,6 +171,8 @@ Na tela principal:
 - **Botão 🔄** ao lado do status do celular — força uma verificação
   ativa e imediata da conexão (manda um ping e espera confirmação),
   em vez de esperar o ciclo passivo de detecção (~30-45s).
+- **Cooldown visível** — depois de uma partida encontrada, a tela mostra
+  a contagem regressiva de cinco segundos antes de permitir outra detecção.
 
 ## Gerar o instalador Windows
 
