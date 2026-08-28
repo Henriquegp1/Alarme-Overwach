@@ -36,6 +36,18 @@ def test_broadcast_envia_evento_para_celular_conectado():
     limpar_estado()
 
 
+def test_callback_informa_quantidade_de_celulares_conectados():
+    limpar_estado()
+    estados = []
+    server.definir_callback_conexao(estados.append)
+    server._conexoes.update((WebSocketFalso(), WebSocketFalso()))
+
+    server._avisar_mudanca_conexao()
+
+    assert estados == [2]
+    limpar_estado()
+
+
 def test_broadcast_remove_conexao_que_falhou():
     limpar_estado()
     websocket = WebSocketFalso(falhar=True)
@@ -46,7 +58,7 @@ def test_broadcast_remove_conexao_que_falhou():
     asyncio.run(server._broadcast_partida_encontrada())
 
     assert websocket not in server._conexoes
-    assert estados == [False]
+    assert estados == [0]
     limpar_estado()
 
 

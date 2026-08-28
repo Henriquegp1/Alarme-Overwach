@@ -59,8 +59,8 @@ _aguardando_pong: dict[WebSocket, asyncio.Event] = {}
 _server_loop: asyncio.AbstractEventLoop | None = None
 
 # Callback opcional, definido pela GUI, chamado sempre que o número de
-# celulares conectados muda entre "zero" e "um ou mais". Recebe um bool
-# (True = pelo menos um celular conectado). Roda dentro do event loop do
+# celulares conectados muda. Recebe a quantidade atual de celulares.
+# Roda dentro do event loop do
 # servidor -- quem registrar o callback é responsável por marcar de volta
 # para a thread principal (ex.: via self.after(0, ...) no CustomTkinter),
 # do mesmo jeito que já é feito com notificar_partida_encontrada.
@@ -79,7 +79,7 @@ def definir_callback_confirmacao(cb):
 
 def _avisar_mudanca_conexao():
     if _on_conexao_mudou is not None:
-        _on_conexao_mudou(len(_conexoes) > 0)
+        _on_conexao_mudou(len(_conexoes))
 
 
 @app.get("/ping")

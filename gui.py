@@ -71,7 +71,7 @@ class App(ctk.CTk):
 
         self._servidor: ServidorThread | None = None
         self._monitor: MonitorPartida | None = None
-        self._celular_conectado = False
+        self._celulares_conectados = 0
         self._eventos: list[tuple[str, str, str]] = []  # (hora, texto, cor) -- só em memória
         self._threshold = carregar_threshold()
         self._logo_img = self._carregar_logo(recurso_path("assets/logo_talon.png"), size=(56, 56))
@@ -504,7 +504,7 @@ class App(ctk.CTk):
         # reabilitar o botão, não de mostrar o resultado.
         self.after(2000, restaurar_botao)
 
-    def _on_conexao_mudou(self, conectado: bool):
+    def _on_conexao_mudou(self, quantidade: int):
         """
         Chamado pela THREAD DO SERVIDOR (event loop asyncio), nunca pela
         thread principal do Tkinter -- por isso a atualização real do
@@ -512,15 +512,21 @@ class App(ctk.CTk):
         _on_match para o evento de partida encontrada.
         """
         def atualizar():
-            self._celular_conectado = conectado
-            if conectado:
+            self._celulares_conectados = quantidade
+            if quantidade:
+                celular = "celular" if quantidade == 1 else "celulares"
+                verbo = "conectado" if quantidade == 1 else "conectados"
                 self.label_status_celular.configure(
-                    text="Celular:     🟢 Conectado", text_color=theme.GREEN_OK,
+                    text=f"Celular:     🟢 {quantidade} {celular} {verbo}",
+                    text_color=theme.GREEN_OK,
                 )
-                self._registrar_evento("Celular conectado", theme.GREEN_OK)
+                self._registrar_evento(
+                    f"{quantidade} {celular} {verbo}", theme.GREEN_OK,
+                )
             else:
                 self.label_status_celular.configure(
-                    text="Celular:     🔴 Desconectado", text_color=theme.RED_DANGER,
+                    text="Celular:     🔴 Nenhum celular conectado",
+                    text_color=theme.RED_DANGER,
                 )
                 self._registrar_evento("Celular desconectado", theme.RED_DANGER)
         self.after(0, atualizar)
@@ -832,7 +838,7 @@ class App(ctk.CTk):
         else:
             resultados["porta"] = False
 
-        resultados["celular"] = self._celular_conectado
+        resultados["celular"] = self._celulares_conectados > 0
 
         if resultados["servidor"] and resultados["celular"]:
             notificar_partida_encontrada()

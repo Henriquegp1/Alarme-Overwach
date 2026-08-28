@@ -165,8 +165,9 @@ Na tela principal:
 - **Botão "Testar alarme"** — disponível assim que o app abre, não
   depende de estar monitorando.
 - **Status de conexão em tempo real** (Servidor + Celular), com
-  bolinha colorida por estado (verde/cinza/preta) e atualização
-  instantânea.
+  bolinha colorida por estado (verde/cinza/preta), quantidade de
+  celulares conectados e atualização instantânea. O sistema envia o
+  alarme para todos os celulares conectados.
 - **Botão 🔄** ao lado do status do celular — força uma verificação
   ativa e imediata da conexão (manda um ping e espera confirmação),
   em vez de esperar o ciclo passivo de detecção (~30-45s).
