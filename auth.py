@@ -1,11 +1,15 @@
 # auth.py
 #
-# Duas credenciais válidas SIMULTANEAMENTE para o WebSocket:
+# Duas formas de credencial válidas para o WebSocket:
 #
 # 1. Token de sessão -- gerado com `secrets` a cada início do programa,
 #    existe só em memória, morre quando o processo termina.
 # 2. Senha personalizada -- opcional, persistida em disco como
 #    hash+salt (PBKDF2), nunca em texto puro.
+#
+# Quando a senha está configurada, o token OU a senha podem autenticar a
+# conexão. Isso mantém a senha opcional e preserva compatibilidade com o QR
+# Code, que sempre carrega o token.
 #
 # Também contém um rate limiter em memória por IP, para dificultar
 # tentativas automatizadas de adivinhar a credencial.
@@ -61,6 +65,15 @@ def invalidar_token_sessao():
 # ---------------------------------------------------------------------
 
 _ITERACOES_PBKDF2 = 200_000
+
+
+def validar_forca_senha(senha: str) -> tuple[bool, str]:
+    """Valida requisitos mínimos antes de aceitar uma nova senha na GUI."""
+    if len(senha) < 4:
+        return False, "A senha precisa ter pelo menos 4 caracteres."
+    if any(caractere.isspace() for caractere in senha):
+        return False, "A senha não pode conter espaços."
+    return True, "Senha forte."
 
 
 def salvar_senha_personalizada(senha: str):

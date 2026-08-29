@@ -152,6 +152,24 @@ def test_arquivo_de_credenciais_com_campo_faltando_e_tratado_como_sem_senha():
     assert auth.existe_senha_personalizada() is False
 
 
+def test_senha_forte_atende_requisitos_minimos():
+    assert auth.validar_forca_senha("SenhaForte123")[0] is True
+
+
+@pytest.mark.parametrize(
+    "senha,trecho_mensagem",
+    [
+        ("abc", "4 caracteres"),
+        ("Senha Forte", "espaços"),
+    ],
+)
+def test_senha_fraca_informa_requisito(senha, trecho_mensagem):
+    valida, mensagem = auth.validar_forca_senha(senha)
+
+    assert valida is False
+    assert trecho_mensagem in mensagem
+
+
 # ---------------------------------------------------------------------
 # Credencial combinada: token OU senha, sem prioridade entre elas
 # ---------------------------------------------------------------------

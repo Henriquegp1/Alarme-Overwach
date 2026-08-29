@@ -1,19 +1,26 @@
 # gui.py
 import datetime
+import os
 import socket
 import threading
 import time
 
 import tkinter as tk
+from tkinter import messagebox, simpledialog
 
+import cv2
 import customtkinter as ctk
+import numpy as np
 import qrcode
-from PIL import ImageTk
+from PIL import Image, ImageTk
 
 import json
 
 import auth
 import calibracao
+import eventos
+import notificacoes
+import perfis
 import theme
 from config import (
     COOLDOWN_APOS_MATCH,
@@ -24,6 +31,8 @@ from config import (
     THRESHOLD,
     salvar_threshold,
     carregar_threshold,
+    carregar_qr_oculto,
+    salvar_qr_oculto,
     recurso_path,
 )
 from monitor import MonitorPartida
@@ -61,8 +70,8 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"Overwatch Match Alarm v{VERSAO}")
-        self.geometry("400x600")  # placeholder -- recalculado a cada troca de tela
-        self.minsize(320, 420)
+        self.geometry("400x360")  # tamanho inicial compacto para evitar a janela enorme em tela cheia
+        self.minsize(350, 300)
         self.resizable(True, True)
         self.configure(fg_color=theme.BG_APP)
 
@@ -73,28 +82,50 @@ class App(ctk.CTk):
 
         self._servidor: ServidorThread | None = None
         self._monitor: MonitorPartida | None = None
+        self._perfil_ativo = perfis.perfil_ativo()
+        self._identidade_perfil = perfis.identidade_perfil(self._perfil_ativo)
+        self._encerrando = False
+        self._reinicio_servidor_agendado = False
+        self._reinicio_monitor_agendado = False
+        self._diagnostico_atualizacao_agendada = False
+        self._falhas_reinicio_servidor = 0
+        self._falhas_reinicio_monitor = 0
         self._celulares_conectados = 0
+        self._ultimo_estado_conexao = None
         self._cooldown_ate = 0.0
+        self._ultima_notificacao_erro_captura = 0.0
+        self._ultimo_evento_cooldown = 0.0
+        self._ultima_confianca_exibida = None
+        self._ultima_atualizacao_confianca = 0.0
         self._eventos: list[tuple[str, str, str]] = []  # (hora, texto, cor) -- só em memória
-        self._threshold = carregar_threshold()
+        self._evento_ativo = perfis.evento_ativo_perfil(self._perfil_ativo)
+        self._threshold = perfis.carregar_threshold_evento(self._perfil_ativo, self._evento_ativo)
         self._logo_img = self._carregar_logo(recurso_path("assets/logo_talon.png"), size=(56, 56))
+        self._qr_oculto = carregar_qr_oculto()
+        self._scroll_configuracoes = None
 
         # Região efetiva usada ao iniciar o monitoramento. Começa com o
         # valor que config.py já resolveu (calibração salva ou
         # placeholder), mas pode ser atualizada em runtime pela tela de
         # Calibração sem precisar reiniciar o app -- por isso NÃO se lê
         # REGIAO_CAPTURA direto dentro de iniciar(), lê-se essa cópia.
-        self._regiao_atual = REGIAO_CAPTURA
+        self._regiao_atual = (
+            calibracao.carregar_regiao_salva(self._perfil_ativo, self._evento_ativo)
+            or calibracao.carregar_regiao_salva(self._perfil_ativo)
+            or REGIAO_CAPTURA
+        )
 
         # Estado da tela de Calibração (fica None até a primeira captura).
         self._monitores_disponiveis: list[dict] = []
         self._captura_atual_img = None       # PIL.Image do monitor inteiro
         self._captura_atual_monitor = None   # dict do mss (offset absoluto)
-        self._captura_scale = 1.0            # fator de redução pra caber no canvas
+        self._captura_scale = 1.0            # fator de redução da imagem pro canvas
+        self._zoom_calibracao = 1.0          # zoom extra sobre a imagem capturada
         self._recorte_canvas = None          # (left, top, largura, altura) em coords de canvas
         self._rect_id = None
         self._rect_inicio = None
         self._captura_photoimage = None      # referência viva -- Tkinter descarta a imagem sem isso
+        self._recorte_pendente = None        # dict com dados do recorte antes de salvar (comparação)
 
         self.tela_principal = ctk.CTkFrame(self, fg_color=theme.BG_APP)
         self.tela_inicial = ctk.CTkFrame(self, fg_color=theme.BG_APP)
@@ -102,36 +133,49 @@ class App(ctk.CTk):
         self.tela_diagnostico = ctk.CTkFrame(self, fg_color=theme.BG_APP)
         self.tela_historico = ctk.CTkFrame(self, fg_color=theme.BG_APP)
         self.tela_calibracao = ctk.CTkFrame(self, fg_color=theme.BG_APP)
+        self.tela_preview_calibracao = ctk.CTkFrame(self, fg_color=theme.BG_APP)
+        self.tela_principal.configure(fg_color=self._identidade_perfil["fundo"])
 
         self._construir_tela_principal(self.tela_principal)
         self._construir_tela_configuracoes(self.tela_configuracoes)
         self._construir_tela_diagnostico(self.tela_diagnostico)
         self._construir_tela_historico(self.tela_historico)
         self._construir_tela_calibracao(self.tela_calibracao)
+        self._construir_tela_preview_calibracao(self.tela_preview_calibracao)
+
+        self.bind_all("<MouseWheel>", self._rolar_tela_configuracoes)
+        self.bind_all("<Button-4>", lambda event: self._rolar_tela_configuracoes(event, multiplicador=4))
+        self.bind_all("<Button-5>", lambda event: self._rolar_tela_configuracoes(event, multiplicador=4))
 
         self.protocol("WM_DELETE_WINDOW", self._ao_fechar)
         self._construir_tela_inicial(self.tela_inicial)
         self._mostrar_tela(self.tela_inicial)
-        self.after(1800, lambda: self._mostrar_tela(self.tela_principal))
+
+        self._primeiro_uso = not calibracao.existe_calibracao_salva(self._perfil_ativo, self._evento_ativo)
+        destino = self.tela_calibracao if self._primeiro_uso else self.tela_principal
+        self.after(1800, lambda: self._mostrar_tela(destino, ao_entrar=self._preparar_tela_calibracao if self._primeiro_uso else None))
         self._iniciar_servidor()
+        self.after(3000, self._verificar_servidor)
+        self.after(3000, self._verificar_monitor)
 
     # ------------------------------------------------------------------
     # Navegação entre telas
     # ------------------------------------------------------------------
     def _mostrar_tela(self, tela: ctk.CTkFrame, ao_entrar=None):
-        for t in (self.tela_inicial, self.tela_principal, self.tela_configuracoes, self.tela_diagnostico, self.tela_historico, self.tela_calibracao):
+        for t in (self.tela_inicial, self.tela_principal, self.tela_configuracoes, self.tela_diagnostico, self.tela_historico, self.tela_calibracao, self.tela_preview_calibracao):
             t.pack_forget()
         tela.pack(fill="both", expand=True)
+        if tela is self.tela_principal:
+            self._aplicar_estado_qr()
         if ao_entrar is not None:
             ao_entrar()
-        # Mede a altura real que a tela pede nesse sistema (fontes/DPI
-        # variam por máquina) em vez de um número fixo chutado por
-        # tela -- um número fixo desatualiza quando um widget novo é
-        # adicionado no futuro (foi exatamente o bug do rodapé sumindo
-        # antes); medir de verdade a cada troca não desatualiza nunca.
+
         self.update_idletasks()
-        largura = max(400, tela.winfo_reqwidth())
-        self.geometry(f"{largura}x{tela.winfo_reqheight()}")
+        largura_atual = max(360, self.winfo_width())
+        altura_atual = max(260, self.winfo_height())
+        largura = max(largura_atual, tela.winfo_reqwidth())
+        altura = max(altura_atual, tela.winfo_reqheight())
+        self.geometry(f"{largura}x{altura}")
 
     def _cabecalho_com_voltar(self, parent, titulo: str, ao_voltar):
         """Cabeçalho padrão das telas secundárias: '← Voltar' + título."""
@@ -158,7 +202,7 @@ class App(ctk.CTk):
     # ==================================================================
     def _construir_tela_inicial(self, tela):
         frame_marca = ctk.CTkFrame(tela, fg_color="transparent")
-        frame_marca.pack(pady=(90, 18), padx=20)
+        frame_marca.pack(pady=(60, 10), padx=20)
 
         self._splash_logo_img = self._carregar_logo(
             recurso_path("assets/logo_talon.png"), size=(150, 150),
@@ -210,10 +254,11 @@ class App(ctk.CTk):
             frame_titulo, text="MATCH ALARM",
             font=theme.font_marca(22), text_color=theme.TEXT_PRIMARY,
         ).pack(anchor="w")
-        ctk.CTkLabel(
-            frame_titulo, text="OVERWATCH", font=theme.font_corpo_bold(12),
+        self._label_nome_perfil = ctk.CTkLabel(
+            frame_titulo, text=self._perfil_ativo.upper(), font=theme.font_corpo_bold(12),
             text_color=theme.BLUE,
-        ).pack(anchor="w")
+        )
+        self._label_nome_perfil.pack(anchor="w")
 
         # ----- Card 1: Controle (status e botões de ação) -----
         self.frame_controle = ctk.CTkFrame(
@@ -226,7 +271,13 @@ class App(ctk.CTk):
             self.frame_controle, text="● Iniciando servidor...",
             font=theme.font_titulo(16), text_color=theme.TEXT_MUTED,
         )
-        self.label_status.pack(pady=(18, 12))
+        self.label_status.pack(pady=(18, 8))
+
+        self.label_status_confianca = ctk.CTkLabel(
+            self.frame_controle, text="Confiança: aguardando",
+            font=theme.font_corpo_bold(12), text_color=theme.TEXT_MUTED,
+        )
+        self.label_status_confianca.pack(pady=(0, 12))
 
         frame_botoes_acao = ctk.CTkFrame(self.frame_controle, fg_color="transparent")
         frame_botoes_acao.pack(pady=(0, 18))
@@ -391,7 +442,7 @@ class App(ctk.CTk):
 
         self.label_status.configure(text="● Pronto para iniciar", text_color=theme.BLUE)
         self.label_status_servidor.configure(text="Servidor:   🟢 Online", text_color=theme.GREEN_OK)
-        self._registrar_evento("Servidor iniciado", theme.GREEN_OK)
+        self._registrar_evento(tipo_evento=eventos.TipoEvento.SERVIDOR_INICIADO)
 
         # Testar alarme e os botões de token só dependem do servidor
         # estar de pé -- não do monitoramento de tela estar ativo.
@@ -409,24 +460,96 @@ class App(ctk.CTk):
         definir_callback_evento(None)
         definir_callback_confirmacao(None)
 
+    def _verificar_servidor(self):
+        """Reinicia o servidor se a thread morrer fora do fechamento normal."""
+        if self._encerrando:
+            return
+
+        servidor_morto = self._servidor is not None and not self._servidor.is_alive()
+        if self._servidor is not None and self._servidor.is_alive():
+            self._falhas_reinicio_servidor = 0
+        if servidor_morto and not self._reinicio_servidor_agendado:
+            self.label_status_servidor.configure(
+                text="Servidor:     🟡 Recuperando...",
+                text_color=theme.YELLOW_ALERT,
+            )
+            self._reinicio_servidor_agendado = True
+            atraso = min(30_000, 1500 * 2 ** self._falhas_reinicio_servidor)
+            self._falhas_reinicio_servidor += 1
+            self.after(atraso, self._reiniciar_servidor)
+
+        self.after(3000, self._verificar_servidor)
+
+    def _reiniciar_servidor(self):
+        self._reinicio_servidor_agendado = False
+        if self._encerrando or self._servidor is None or self._servidor.is_alive():
+            return
+        self._iniciar_servidor()
+
+    def _verificar_monitor(self):
+        """Detecta uma thread de captura encerrada durante o monitoramento."""
+        if self._encerrando:
+            return
+
+        monitor_esperado = self.btn_parar.cget("state") == "normal"
+        monitor_morto = self._monitor is not None and not self._monitor.is_alive()
+        if self._monitor is not None and self._monitor.is_alive():
+            self._falhas_reinicio_monitor = 0
+        if monitor_esperado and monitor_morto and not self._reinicio_monitor_agendado:
+            self._reinicio_monitor_agendado = True
+            self._registrar_evento(
+                tipo_evento=eventos.TipoEvento.ERRO_CAPTURA,
+                descricao_extra="Monitor encerrou inesperadamente",
+            )
+            atraso = min(30_000, 1500 * 2 ** self._falhas_reinicio_monitor)
+            self._falhas_reinicio_monitor += 1
+            self.after(atraso, self._reiniciar_monitor)
+
+        self.after(3000, self._verificar_monitor)
+
+    def _reiniciar_monitor(self):
+        self._reinicio_monitor_agendado = False
+        if self._encerrando or self.btn_parar.cget("state") != "normal":
+            return
+        self._monitor = None
+        self.iniciar()
+        if self._monitor is not None and self._monitor.is_alive():
+            self._registrar_evento(tipo_evento=eventos.TipoEvento.MONITOR_REINICIADO)
+
     # ------------------------------------------------------------------
     # Ações
     # ------------------------------------------------------------------
     def iniciar(self):
         """Liga só a captura de tela/matching -- o servidor já está de
         pé desde a abertura do app (ver _iniciar_servidor)."""
+        if not calibracao.existe_calibracao_salva(self._perfil_ativo, self._evento_ativo):
+            self._mostrar_tela(self.tela_calibracao, ao_entrar=self._preparar_tela_calibracao)
+            self.label_status.configure(text="● Calibração necessária", text_color=theme.YELLOW_ALERT)
+            self._registrar_evento("Calibração necessária antes de iniciar", theme.YELLOW_ALERT)
+            return
+
+        template_evento = perfis.caminhos_evento_perfil(self._perfil_ativo, self._evento_ativo)["template"]
+        if not os.path.exists(template_evento):
+            template_evento = perfis.caminhos_perfil(self._perfil_ativo)["template"]
+
         try:
             self._monitor = MonitorPartida(
                 regiao=self._regiao_atual,
-                template_path=TEMPLATE_PATH,
+                template_path=template_evento,
                 threshold=self._threshold,
                 intervalo=INTERVALO_CAPTURA,
                 cooldown=COOLDOWN_APOS_MATCH,
                 on_match=self._on_match,
                 on_near_match=self._on_near_match,
+                on_error=self._on_monitor_erro,
+                on_cooldown=self._on_monitor_cooldown,
             )
         except FileNotFoundError:
             self.label_status.configure(text="● Erro no Template", text_color=theme.RED_DANGER)
+            self._registrar_evento(
+                tipo_evento=eventos.TipoEvento.TEMPLATE_INVALIDO,
+                descricao_extra="Faça uma nova calibração",
+            )
             return
 
         self._monitor.start()
@@ -434,6 +557,175 @@ class App(ctk.CTk):
         self.label_status.configure(text="● Monitorando...", text_color=theme.GREEN_OK)
         self.btn_iniciar.configure(state="disabled")
         self.btn_parar.configure(state="normal")
+
+    def _selecionar_perfil(self, nome: str):
+        if self._monitor is not None:
+            self.parar()
+        perfis.selecionar_perfil(nome)
+        self._perfil_ativo = nome
+        self._evento_ativo = perfis.evento_ativo_perfil(nome)
+        self._identidade_perfil = perfis.identidade_perfil(nome)
+        self._label_nome_perfil.configure(
+            text=nome.upper(), text_color=self._identidade_perfil["cor"],
+        )
+        self._atualizar_badge_perfil(nome)
+        self.tela_principal.configure(fg_color=self._identidade_perfil["fundo"])
+        self._regiao_atual = (
+            calibracao.carregar_regiao_salva(nome, self._evento_ativo)
+            or calibracao.carregar_regiao_salva(nome)
+            or REGIAO_CAPTURA
+        )
+        self._primeiro_uso = not calibracao.existe_calibracao_salva(nome, self._evento_ativo)
+        self._threshold = perfis.carregar_threshold_evento(nome, self._evento_ativo)
+        if hasattr(self, "_slider_confianca"):
+            self._slider_confianca.set(self._threshold)
+            self._label_confianca.configure(text=f"{self._threshold:.0%}")
+        if hasattr(self, "_var_evento"):
+            self._var_evento.set(self._evento_ativo)
+            self._menu_evento.configure(values=[evento["nome"] for evento in perfis.listar_eventos_perfil(nome)])
+        self._atualizar_status_perfil()
+
+    def _selecionar_evento(self, nome_evento: str):
+        if self._monitor is not None:
+            self.parar()
+        perfis.selecionar_evento_perfil(self._perfil_ativo, nome_evento)
+        self._evento_ativo = nome_evento
+        self._threshold = perfis.carregar_threshold_evento(self._perfil_ativo, nome_evento)
+        self._regiao_atual = (
+            calibracao.carregar_regiao_salva(self._perfil_ativo, nome_evento)
+            or calibracao.carregar_regiao_salva(self._perfil_ativo)
+            or REGIAO_CAPTURA
+        )
+        self._primeiro_uso = not calibracao.existe_calibracao_salva(self._perfil_ativo, nome_evento)
+        if hasattr(self, "_slider_confianca"):
+            self._slider_confianca.set(self._threshold)
+            self._label_confianca.configure(text=f"{self._threshold:.0%}")
+        self._atualizar_status_perfil()
+
+    def _atualizar_badge_perfil(self, nome: str):
+        for filho in self._frame_imagem_perfil.winfo_children():
+            filho.destroy()
+
+        if nome in perfis.PERFIS_PRINCIPAIS:
+            logo = perfis.logo_perfil(nome)
+            if logo:
+                try:
+                    img = Image.open(logo).convert("RGBA")
+                    img = img.resize((44, 44), Image.Resampling.LANCZOS)
+                    ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(40, 40))
+                    self._label_badge_perfil = ctk.CTkLabel(
+                        self._frame_imagem_perfil,
+                        text="",
+                        image=ctk_img,
+                        compound="center",
+                        width=54,
+                        height=54,
+                        fg_color="transparent",
+                        text_color=theme.TEXT_PRIMARY,
+                        corner_radius=12,
+                    )
+                    self._label_badge_perfil.pack(expand=True, padx=0, pady=0)
+                    return
+                except Exception:
+                    pass
+
+            self._label_badge_perfil = ctk.CTkLabel(
+                self._frame_imagem_perfil,
+                text=self._iniciais_perfil(nome),
+                width=54,
+                height=54,
+                fg_color=self._identidade_perfil["cor"],
+                text_color=theme.TEXT_PRIMARY,
+                font=theme.font_corpo_bold(10),
+                corner_radius=12,
+            )
+            self._label_badge_perfil.pack(expand=True, padx=0, pady=0)
+            return
+
+        self._label_badge_perfil = ctk.CTkLabel(
+            self._frame_imagem_perfil,
+            text="",
+            width=54,
+            height=54,
+            fg_color="transparent",
+            text_color=theme.TEXT_PRIMARY,
+            corner_radius=12,
+        )
+        self._label_badge_perfil.pack(expand=True, padx=0, pady=0)
+
+    @staticmethod
+    def _iniciais_perfil(nome: str) -> str:
+        palavras = [palavra for palavra in nome.split() if palavra]
+        if len(palavras) > 1:
+            return "".join(palavra[0] for palavra in palavras[:3]).upper()
+        return nome[:3].upper()
+
+    def _atualizar_status_perfil(self):
+        if calibracao.existe_calibracao_salva(self._perfil_ativo, self._evento_ativo):
+            self.btn_calibracao_config.configure(
+                text="🎯  Calibração",
+                fg_color=theme.GRAY_BTN,
+                hover_color=theme.GRAY_BTN_HOVER,
+                text_color=theme.TEXT_PRIMARY,
+            )
+            self.label_status.configure(
+                text=f"● Evento ativo: {self._evento_ativo}", text_color=theme.BLUE,
+            )
+        else:
+            self.btn_calibracao_config.configure(
+                text="🎯  Calibração necessária",
+                fg_color=theme.ORANGE,
+                hover_color=theme.ORANGE_HOVER,
+                text_color=theme.ORANGE_TEXT_ON,
+            )
+            self.label_status.configure(
+                text=f"● Calibração necessária para {self._evento_ativo}",
+                text_color=theme.YELLOW_ALERT,
+            )
+
+    def _criar_perfil(self):
+        nome = simpledialog.askstring("Novo perfil", "Nome do jogo:", parent=self)
+        if nome is None:
+            return
+        try:
+            nome = perfis.criar_perfil(nome)
+        except ValueError as erro:
+            messagebox.showerror("Perfil inválido", str(erro), parent=self)
+            return
+        self._menu_perfil.configure(values=perfis.listar_perfis())
+        self._var_perfil.set(nome)
+        self._selecionar_perfil(nome)
+
+    def _criar_evento(self):
+        nome_evento = simpledialog.askstring("Novo evento", "Nome do evento:", parent=self)
+        if nome_evento is None:
+            return
+        try:
+            nome_evento = perfis.criar_evento_perfil(self._perfil_ativo, nome_evento)
+        except ValueError as erro:
+            messagebox.showerror("Evento inválido", str(erro), parent=self)
+            return
+        self._menu_evento.configure(values=[evento["nome"] for evento in perfis.listar_eventos_perfil(self._perfil_ativo)])
+        self._var_evento.set(nome_evento)
+        self._selecionar_evento(nome_evento)
+
+    def _excluir_evento(self):
+        if len(perfis.listar_eventos_perfil(self._perfil_ativo)) <= 2:
+            messagebox.showwarning("Não é possível excluir", "Deixe pelo menos um evento extra além do principal.", parent=self)
+            return
+        nome_evento = self._evento_ativo
+        if nome_evento == perfis.NOME_EVENTO_PADRAO:
+            messagebox.showwarning("Não é possível excluir", "O evento principal não pode ser removido.", parent=self)
+            return
+        try:
+            perfis.excluir_evento_perfil(self._perfil_ativo, nome_evento)
+        except ValueError as erro:
+            messagebox.showerror("Erro ao excluir evento", str(erro), parent=self)
+            return
+        eventos = [evento["nome"] for evento in perfis.listar_eventos_perfil(self._perfil_ativo)]
+        self._menu_evento.configure(values=eventos)
+        self._var_evento.set(perfis.evento_ativo_perfil(self._perfil_ativo))
+        self._selecionar_evento(perfis.evento_ativo_perfil(self._perfil_ativo))
 
     def parar(self):
         """Desliga só a captura de tela/matching -- o servidor continua
@@ -448,10 +740,34 @@ class App(ctk.CTk):
             self._monitor = None
 
         self.label_status.configure(text="● Pronto para iniciar", text_color=theme.BLUE)
+        self._atualizar_status_confianca()
         if estava_rodando:
-            self._registrar_evento("Monitoramento parado", theme.TEXT_MUTED)
+            self._registrar_evento(tipo_evento=eventos.TipoEvento.SERVIDOR_PARADO)
         self.btn_iniciar.configure(state="normal")
         self.btn_parar.configure(state="disabled")
+
+    def _atualizar_status_confianca(self, confianca: float | None = None):
+        """Mostra a força atual da detecção sem poluir o histórico."""
+        if self.btn_parar.cget("state") != "normal":
+            self.label_status_confianca.configure(text="Confiança: aguardando", text_color=theme.TEXT_MUTED)
+            return
+
+        if confianca is None:
+            self.label_status_confianca.configure(text="Confiança: aguardando", text_color=theme.TEXT_MUTED)
+            return
+
+        percent = confianca * 100
+        if confianca >= self._threshold:
+            texto = f"Confiança: {percent:.1f}% (estável)"
+            cor = theme.GREEN_OK
+        elif confianca >= self._threshold - 0.05:
+            texto = f"Confiança: {percent:.1f}% (próximo)"
+            cor = theme.YELLOW_ALERT
+        else:
+            texto = f"Confiança: {percent:.1f}% (baixa)"
+            cor = theme.TEXT_MUTED
+
+        self.label_status_confianca.configure(text=texto, text_color=cor)
 
     def _testar_alarme(self):
         """
@@ -477,11 +793,17 @@ class App(ctk.CTk):
 
     def _on_match(self):
         notificar_partida_encontrada()
+        # Dispara notificação de desktop mesmo se minimizado
+        icone_path = recurso_path("assets/logo_talon.ico")
+        notificacoes.notificar_partida(icone_path if os.path.exists(icone_path) else None)
 
         def atualizar():
             self._cooldown_ate = time.monotonic() + COOLDOWN_APOS_MATCH
             self._atualizar_cooldown()
-            self._registrar_evento("🔔 Partida encontrada — alarme disparado", theme.YELLOW_ALERT)
+            self._atualizar_status_confianca(self._threshold)
+            self._registrar_evento(tipo_evento=eventos.TipoEvento.PARTIDA_ENCONTRADA)
+            if self._celulares_conectados == 0:
+                self._registrar_evento(tipo_evento=eventos.TipoEvento.SEM_CELULAR_CONECTADO)
 
         self.after(0, atualizar)
 
@@ -496,11 +818,41 @@ class App(ctk.CTk):
             self.label_status.configure(text="● Monitorando...", text_color=theme.GREEN_OK)
 
     def _on_near_match(self, confianca: float):
-        """Registra uma detecção próxima do limite sem disparar alarme."""
+        """Atualiza apenas o diagnóstico visual, sem poluir o histórico."""
+        agora = time.monotonic()
+        if (
+            self._ultima_confianca_exibida is not None
+            and abs(confianca - self._ultima_confianca_exibida) < 0.01
+            and agora - self._ultima_atualizacao_confianca < 0.5
+        ):
+            return
+        self._ultima_confianca_exibida = confianca
+        self._ultima_atualizacao_confianca = agora
+        self.after(0, lambda: self._atualizar_status_confianca(confianca))
+
+    def _on_monitor_erro(self, tipo_erro: str, descricao: str):
+        """Exibe falhas do monitor sem executar Tkinter na thread de captura."""
+        def atualizar():
+            if tipo_erro == "CAPTURA_FALHOU":
+                tipo_evento = eventos.TipoEvento.ERRO_CAPTURA
+            else:
+                tipo_evento = eventos.TipoEvento.ERRO_MATCHING
+            self._registrar_evento(tipo_evento=tipo_evento, descricao_extra=descricao[:80])
+
+            agora = time.monotonic()
+            if tipo_erro == "CAPTURA_FALHOU" and agora - self._ultima_notificacao_erro_captura >= 30:
+                notificacoes.notificar_erro_captura()
+                self._ultima_notificacao_erro_captura = agora
+
+        self.after(0, atualizar)
+
+    def _on_monitor_cooldown(self, restante: float):
+        """Registra uma detecção ignorada durante o cooldown atual."""
         self.after(
             0,
             lambda: self._registrar_evento(
-                f"Quase partida encontrada ({confianca:.0%})", theme.YELLOW_ALERT,
+                tipo_evento=eventos.TipoEvento.DETECCAO_BLOQUEADA_COOLDOWN,
+                descricao_extra=f"{restante:.1f}s restantes",
             ),
         )
 
@@ -528,7 +880,10 @@ class App(ctk.CTk):
         _on_match para o evento de partida encontrada.
         """
         def atualizar():
+            estado_anterior = self._ultimo_estado_conexao
             self._celulares_conectados = quantidade
+            self._ultimo_estado_conexao = quantidade
+            estado_mudou = estado_anterior != quantidade
             if quantidade:
                 celular = "celular" if quantidade == 1 else "celulares"
                 verbo = "conectado" if quantidade == 1 else "conectados"
@@ -536,15 +891,18 @@ class App(ctk.CTk):
                     text=f"Celular:     🟢 {quantidade} {celular} {verbo}",
                     text_color=theme.GREEN_OK,
                 )
-                self._registrar_evento(
-                    f"{quantidade} {celular} {verbo}", theme.GREEN_OK,
-                )
+                if estado_mudou:
+                    self._registrar_evento(
+                        tipo_evento=eventos.TipoEvento.CELULAR_CONECTADO,
+                        descricao_extra=f"{quantidade} {celular} {verbo}"
+                    )
             else:
                 self.label_status_celular.configure(
                     text="Celular:     🔴 Nenhum celular conectado",
                     text_color=theme.RED_DANGER,
                 )
-                self._registrar_evento("Celular desconectado", theme.RED_DANGER)
+                if estado_anterior and estado_anterior > 0:
+                    self._registrar_evento(tipo_evento=eventos.TipoEvento.CONEXAO_PERDIDA)
         self.after(0, atualizar)
 
     def _on_confirmacao_recebida(self):
@@ -553,10 +911,16 @@ class App(ctk.CTk):
         self.after(0, atualizar)
 
     def _on_evento_servidor(self, texto: str):
-        self.after(
-            0,
-            lambda: self._registrar_evento(texto, theme.RED_DANGER),
-        )
+        def registrar():
+            if "Tentativa de autenticação inválida" in texto:
+                self._registrar_evento(
+                    tipo_evento=eventos.TipoEvento.SENHA_FALHA_AUTENTICACAO,
+                    descricao_extra=texto,
+                )
+            else:
+                self._registrar_evento(texto, theme.RED_DANGER)
+
+        self.after(0, registrar)
 
     def _atualizar_conexao(self):
         token = auth.token_sessao_atual()
@@ -574,37 +938,84 @@ class App(ctk.CTk):
         auth.gerar_novo_token()
         desconectar_todos_por_reautenticacao()
         self._atualizar_conexao()
+        self._registrar_evento(tipo_evento=eventos.TipoEvento.TOKEN_ROTACIONADO)
 
     def _gerar_qrcode(self, dado: str):
         img = qrcode.make(dado).convert("RGB")
         ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(200, 200))
         self.label_qr.configure(image=ctk_img, text="")
 
-    def _alternar_qr(self):
-        if self.frame_qr_moldura.winfo_manager():
-            self.frame_qr_moldura.pack_forget()
+    def _rolar_tela_configuracoes(self, event, multiplicador: int = 4):
+        if not self.tela_configuracoes.winfo_ismapped() or self._scroll_configuracoes is None:
+            return "break"
+        canvas = getattr(self._scroll_configuracoes, "_parent_canvas", None)
+        if canvas is None:
+            return "break"
+        delta = int(-event.delta / 120) if hasattr(event, "delta") else 0
+        if delta == 0:
+            return "break"
+        canvas.yview_scroll(delta * multiplicador, "units")
+        return "break"
+
+    def _aplicar_estado_qr(self):
+        if self._qr_oculto:
+            if self.frame_qr_moldura.winfo_manager():
+                self.frame_qr_moldura.pack_forget()
             self.btn_ocultar_qr.configure(text="Mostrar QR Code")
         else:
-            self.frame_qr_moldura.pack(pady=6, before=self.label_token)
+            if not self.frame_qr_moldura.winfo_manager():
+                self.frame_qr_moldura.pack(pady=6, before=self.label_token)
             self.btn_ocultar_qr.configure(text="Ocultar QR Code")
+
+    def _alternar_qr(self):
+        self._qr_oculto = not self._qr_oculto
+        salvar_qr_oculto(self._qr_oculto)
+        self._aplicar_estado_qr()
+
+        self.update_idletasks()
+        nova_altura = self.tela_principal.winfo_reqheight()
+        self.geometry(f"400x{nova_altura}")
 
     def _alternar_maximizado(self):
         self.state("normal" if self.state() == "zoomed" else "zoomed")
 
-    def _registrar_evento(self, texto: str, cor: str | None = None):
+    def _registrar_evento(self, texto: str = None, cor: str = None, tipo_evento: eventos.TipoEvento = None, descricao_extra: str = None):
         """
-        Histórico só em memória -- some quando o programa fecha, sem
-        persistência em disco. Guarda só os 50 mais recentes pra não
-        crescer sem limite numa sessão longa.
+        Registra um evento no histórico (em memória).
+        Pode ser chamado de duas formas:
+
+        1. Compatibilidade legada: _registrar_evento(texto, cor)
+        2. Com tipo: _registrar_evento(tipo_evento=TipoEvento.X, descricao_extra="...")
+
+        Histórico guarda só os 50 mais recentes pra não crescer sem limite.
 
         IMPORTANTE: só chame isso pela thread principal do Tkinter.
-        Quem roda em outra thread (_on_match vindo do monitor,
-        _on_conexao_mudou vindo do servidor) já embrulha a chamada num
-        self.after(0, ...) antes de chegar aqui -- olha esses métodos
-        se for adicionar uma chamada nova.
+        Quem roda em outra thread embrulha a chamada num self.after(0, ...).
         """
-        hora = datetime.datetime.now().strftime("%H:%M:%S")
-        self._eventos.append((hora, texto, cor or theme.TEXT_PRIMARY))
+        if tipo_evento is not None:
+            # Novo sistema de eventos categorizado
+            evt = eventos.Evento(tipo=tipo_evento, timestamp=time.time(), descricao_extra=descricao_extra)
+            icone, nome = eventos.DESCRICOES_EVENTOS.get(tipo_evento, ("❓", "Desconhecido"))
+            hora = evt.tempo_formatado
+            texto_final = f"{icone} {nome}"
+            if descricao_extra:
+                texto_final += f" ({descricao_extra})"
+            # Mapeia tipo de evento para cor
+            if "✓" in icone or "🟢" in icone:
+                cor_final = theme.GREEN_OK
+            elif "🔴" in icone or "✕" in icone or "⏹" in icone:
+                cor_final = theme.RED_DANGER
+            elif "⚠" in icone or "⏱" in icone or "🔄" in icone:
+                cor_final = theme.YELLOW_ALERT
+            else:
+                cor_final = theme.BLUE
+        else:
+            # Modo legado: texto + cor direta
+            hora = datetime.datetime.now().strftime("%H:%M:%S")
+            texto_final = texto
+            cor_final = cor or theme.TEXT_PRIMARY
+
+        self._eventos.append((hora, texto_final, cor_final))
         self._eventos = self._eventos[-50:]
         self._atualizar_lista_historico()
 
@@ -625,19 +1036,115 @@ class App(ctk.CTk):
             tela, "CONFIGURAÇÕES",
             ao_voltar=lambda: self._mostrar_tela(self.tela_principal),
         )
-        ctk.CTkLabel(
-            tela, text="Senha de acesso à sessão", font=theme.font_corpo(12),
-            text_color=theme.TEXT_MUTED,
-        ).pack(pady=(0, 16), padx=20, anchor="w")
 
-        card_senha = ctk.CTkFrame(
-            tela, fg_color=theme.BG_CARD, corner_radius=14,
+        conteudo = ctk.CTkScrollableFrame(tela, fg_color=theme.BG_APP, corner_radius=0)
+        self._scroll_configuracoes = conteudo
+        conteudo.pack(fill="both", expand=True, padx=0, pady=(0, 16))
+
+        card_perfil = ctk.CTkFrame(
+            conteudo, fg_color=theme.BG_CARD, corner_radius=14,
             border_width=1, border_color=theme.BORDER_CARD,
         )
-        card_senha.pack(padx=24, fill="x")
+        card_perfil.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(
+            card_perfil, text="Perfil do jogo", font=theme.font_corpo_bold(13),
+            text_color=theme.TEXT_PRIMARY,
+        ).pack(pady=(14, 2), padx=16, anchor="w")
+        ctk.CTkLabel(
+            card_perfil, text="Cada perfil possui calibração própria.",
+            font=theme.font_corpo(11), text_color=theme.TEXT_MUTED,
+        ).pack(padx=16, anchor="w")
+        frame_perfil = ctk.CTkFrame(card_perfil, fg_color="transparent")
+        frame_perfil.pack(padx=16, pady=(8, 14), fill="x")
+
+        self._frame_imagem_perfil = ctk.CTkFrame(
+            frame_perfil, width=60, height=60, fg_color="transparent",
+        )
+        self._frame_imagem_perfil.pack(side="right", padx=(8, 0))
+        self._frame_imagem_perfil.pack_propagate(False)
+        self._label_badge_perfil = ctk.CTkLabel(
+            self._frame_imagem_perfil,
+            text=self._iniciais_perfil(self._perfil_ativo),
+            width=54,
+            height=54,
+            fg_color=self._identidade_perfil["cor"],
+            text_color=theme.TEXT_PRIMARY,
+            font=theme.font_corpo_bold(11),
+            corner_radius=12,
+        )
+        self._label_badge_perfil.pack(expand=True, padx=0, pady=0)
+        self._atualizar_badge_perfil(self._perfil_ativo)
+        self._var_perfil = ctk.StringVar(value=self._perfil_ativo)
+        self._menu_perfil = ctk.CTkOptionMenu(
+            frame_perfil, variable=self._var_perfil,
+            values=perfis.listar_perfis(), command=self._selecionar_perfil,
+            fg_color=theme.BG_APP, button_color=theme.GRAY_BTN,
+            button_hover_color=theme.GRAY_BTN_HOVER, text_color=theme.TEXT_PRIMARY,
+            width=190,
+        )
+        self._menu_perfil.pack(side="left")
+        ctk.CTkButton(
+            frame_perfil, text="+", width=32, command=self._criar_perfil,
+            fg_color=theme.BLUE, hover_color=theme.BLUE_HOVER,
+            text_color=theme.TEXT_PRIMARY, corner_radius=8,
+        ).pack(side="left", padx=(0, 6), before=self._menu_perfil)
+
+        card_evento = ctk.CTkFrame(
+            conteudo, fg_color=theme.BG_CARD, corner_radius=14,
+            border_width=1, border_color=theme.BORDER_CARD,
+        )
+        card_evento.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(
+            card_evento, text="Evento do jogo", font=theme.font_corpo_bold(13),
+            text_color=theme.TEXT_PRIMARY,
+        ).pack(pady=(14, 2), padx=16, anchor="w")
+        ctk.CTkLabel(
+            card_evento, text="Troque ou adicione uma rotina específica.",
+            font=theme.font_corpo(11), text_color=theme.TEXT_MUTED,
+        ).pack(padx=16, anchor="w")
+
+        eventos = [evento["nome"] for evento in perfis.listar_eventos_perfil(self._perfil_ativo)]
+        frame_eventos = ctk.CTkFrame(card_evento, fg_color="transparent")
+        frame_eventos.pack(padx=16, pady=(8, 14), fill="x")
+
+        self._var_evento = ctk.StringVar(value=self._evento_ativo)
+        self._menu_evento = ctk.CTkOptionMenu(
+            frame_eventos, variable=self._var_evento,
+            values=eventos, command=self._selecionar_evento,
+            fg_color=theme.BG_APP, button_color=theme.GRAY_BTN,
+            button_hover_color=theme.GRAY_BTN_HOVER, text_color=theme.TEXT_PRIMARY,
+            width=190,
+        )
+        self._menu_evento.pack(side="left")
+        ctk.CTkButton(
+            frame_eventos, text="＋", width=32, command=self._criar_evento,
+            fg_color=theme.BLUE, hover_color=theme.BLUE_HOVER,
+            text_color=theme.TEXT_PRIMARY, corner_radius=8,
+        ).pack(side="left", padx=(0, 6), before=self._menu_evento)
+        ctk.CTkButton(
+            frame_eventos, text="🗑", width=32, command=self._excluir_evento,
+            fg_color="transparent", hover_color=theme.GRAY_BTN_HOVER,
+            text_color="white", corner_radius=8,
+            border_width=1, border_color="white",
+            font=theme.font_corpo_bold(12),
+        ).pack(side="left", padx=(6, 0))
+
+        card_senha = ctk.CTkFrame(
+            conteudo, fg_color=theme.BG_CARD, corner_radius=14,
+            border_width=1, border_color=theme.BORDER_CARD,
+        )
+        card_senha.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(
+            card_senha, text="Alterar senha", font=theme.font_corpo_bold(13),
+            text_color=theme.TEXT_PRIMARY,
+        ).pack(pady=(14, 2), padx=16, anchor="w")
+        ctk.CTkLabel(
+            card_senha, text="Ajuste a proteção da sessão atual.",
+            font=theme.font_corpo(11), text_color=theme.TEXT_MUTED,
+        ).pack(padx=16, anchor="w")
 
         label_status_senha = ctk.CTkLabel(card_senha, text="", font=theme.font_corpo_bold(13))
-        label_status_senha.pack(pady=(16, 12))
+        label_status_senha.pack(pady=(12, 8), padx=16, anchor="w")
 
         def atualizar_status_senha():
             if auth.existe_senha_personalizada():
@@ -647,14 +1154,40 @@ class App(ctk.CTk):
 
         atualizar_status_senha()
 
+        frame_senha_form = ctk.CTkFrame(card_senha, fg_color="transparent")
+
+        def alternar_formulario_senha():
+            if frame_senha_form.winfo_manager():
+                frame_senha_form.pack_forget()
+                btn_alterar_senha.configure(text="Alterar senha")
+            else:
+                frame_senha_form.pack(fill="x", padx=16, pady=(4, 0))
+                btn_alterar_senha.configure(text="Fechar edição")
+
+        btn_alterar_senha = ctk.CTkButton(
+            card_senha, text="Alterar senha", width=220,
+            command=alternar_formulario_senha,
+            fg_color=theme.GRAY_BTN, hover_color=theme.GRAY_BTN_HOVER,
+            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(12),
+            corner_radius=8,
+        )
+        btn_alterar_senha.pack(pady=(0, 14), padx=16)
+
         campo_senha = ctk.CTkEntry(
-            card_senha, placeholder_text="Nova senha", show="•", width=260,
+            frame_senha_form, placeholder_text="Nova senha", show="•", width=260,
             fg_color=theme.BG_APP, border_color=theme.BORDER_CARD,
             text_color=theme.TEXT_PRIMARY,
         )
         campo_senha.pack(pady=(0, 8))
 
-        label_feedback = ctk.CTkLabel(card_senha, text="", font=theme.font_corpo(12), text_color=theme.TEXT_MUTED)
+        campo_confirmacao = ctk.CTkEntry(
+            frame_senha_form, placeholder_text="Confirme a nova senha", show="•", width=260,
+            fg_color=theme.BG_APP, border_color=theme.BORDER_CARD,
+            text_color=theme.TEXT_PRIMARY,
+        )
+        campo_confirmacao.pack(pady=(0, 8))
+
+        label_feedback = ctk.CTkLabel(frame_senha_form, text="", font=theme.font_corpo(12), text_color=theme.TEXT_MUTED)
         label_feedback.pack(pady=(0, 4))
 
         def salvar():
@@ -662,8 +1195,16 @@ class App(ctk.CTk):
             if not senha:
                 label_feedback.configure(text="Digite uma senha antes de salvar.", text_color=theme.RED_DANGER)
                 return
+            senha_valida, mensagem = auth.validar_forca_senha(senha)
+            if not senha_valida:
+                label_feedback.configure(text=mensagem, text_color=theme.RED_DANGER)
+                return
+            if senha != campo_confirmacao.get():
+                label_feedback.configure(text="A confirmação não corresponde à nova senha.", text_color=theme.RED_DANGER)
+                return
             auth.salvar_senha_personalizada(senha)
             campo_senha.delete(0, "end")
+            campo_confirmacao.delete(0, "end")
 
             # Derruba qualquer celular já conectado com a senha antiga --
             # sem isso, a sessão antiga fica válida (WebSocket já
@@ -676,21 +1217,51 @@ class App(ctk.CTk):
                 text="Senha salva. Qualquer celular conectado foi desconectado -- reconecte com a nova senha.",
                 text_color=theme.GREEN_OK,
             )
+            self._registrar_evento(tipo_evento=eventos.TipoEvento.SENHA_ALTERADA)
             atualizar_status_senha()
 
         ctk.CTkButton(
-            card_senha, text="Salvar senha", width=260, command=salvar,
+            frame_senha_form, text="Salvar senha", width=260, command=salvar,
             fg_color=theme.ORANGE, hover_color=theme.ORANGE_HOVER,
             text_color=theme.ORANGE_TEXT_ON, font=theme.font_corpo_bold(13),
             corner_radius=8,
-        ).pack(pady=(4, 18))
+        ).pack(pady=(4, 8))
 
-        # Sistema -- ponto de entrada pro Diagnóstico.
+        def remover():
+            auth.remover_senha_personalizada()
+            campo_senha.delete(0, "end")
+            campo_confirmacao.delete(0, "end")
+            label_feedback.configure(text="Senha removida.", text_color=theme.YELLOW_ALERT)
+            atualizar_status_senha()
+
+        ctk.CTkButton(
+            frame_senha_form, text="Remover senha", command=remover, width=260,
+            fg_color=theme.RED_DANGER, hover_color=theme.RED_DANGER_HOVER,
+            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(13),
+            corner_radius=8,
+        ).pack(pady=(0, 18))
+
+        # Ferramentas -- diagnóstico, histórico e calibração ficam agrupados.
         card_sistema = ctk.CTkFrame(
-            tela, fg_color=theme.BG_CARD, corner_radius=14,
+            conteudo, fg_color=theme.BG_CARD, corner_radius=14,
             border_width=1, border_color=theme.BORDER_CARD,
         )
         card_sistema.pack(padx=24, pady=(16, 0), fill="x")
+        ctk.CTkLabel(
+            card_sistema, text="Ferramentas do sistema",
+            font=theme.font_corpo_bold(13), text_color=theme.TEXT_PRIMARY,
+        ).pack(pady=(14, 8), padx=16, anchor="w")
+
+        self.btn_calibracao_config = ctk.CTkButton(
+            card_sistema, text="🎯  Calibração", width=260,
+            command=lambda: self._mostrar_tela(
+                self.tela_calibracao, ao_entrar=self._preparar_tela_calibracao,
+            ),
+            fg_color=theme.BLUE, hover_color=theme.BLUE_HOVER,
+            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(13),
+            corner_radius=8,
+        )
+        self.btn_calibracao_config.pack(padx=16, pady=(0, 8))
 
         ctk.CTkButton(
             card_sistema, text="🔧  Diagnóstico do sistema", width=260,
@@ -700,10 +1271,10 @@ class App(ctk.CTk):
             fg_color=theme.BLUE, hover_color=theme.BLUE_HOVER,
             text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(13),
             corner_radius=8,
-        ).pack(padx=16, pady=(16, 8))
+        ).pack(padx=16, pady=(0, 8))
 
         card_confianca = ctk.CTkFrame(
-            tela, fg_color=theme.BG_CARD, corner_radius=14,
+            conteudo, fg_color=theme.BG_CARD, corner_radius=14,
             border_width=1, border_color=theme.BORDER_CARD,
         )
         card_confianca.pack(padx=24, pady=(16, 0), fill="x")
@@ -713,25 +1284,26 @@ class App(ctk.CTk):
             font=theme.font_corpo_bold(13), text_color=theme.TEXT_PRIMARY,
         ).pack(pady=(14, 2))
 
-        label_confianca = ctk.CTkLabel(
+        self._label_confianca = ctk.CTkLabel(
             card_confianca, text=f"{self._threshold:.0%}",
             font=theme.font_titulo(16), text_color=theme.BLUE,
         )
-        label_confianca.pack(pady=(0, 4))
+        self._label_confianca.pack(pady=(0, 4))
 
         def ajustar_confianca(valor):
             self._threshold = round(float(valor), 2)
-            label_confianca.configure(text=f"{self._threshold:.0%}")
-            salvar_threshold(self._threshold)
+            self._label_confianca.configure(text=f"{self._threshold:.0%}")
+            perfis.salvar_threshold_evento(self._perfil_ativo, self._evento_ativo, self._threshold)
 
-        ctk.CTkSlider(
+        self._slider_confianca = ctk.CTkSlider(
             card_confianca, from_=0.70, to=0.90, number_of_steps=20,
             width=260, command=ajustar_confianca,
             button_color=theme.ORANGE, button_hover_color=theme.ORANGE_HOVER,
             progress_color=theme.BLUE,
-        ).pack(pady=(0, 14))
+        )
+        self._slider_confianca.pack(pady=(0, 14))
         # O valor inicial do slider deve acompanhar o valor configurado.
-        card_confianca.winfo_children()[-1].set(self._threshold)
+        self._slider_confianca.set(self._threshold)
 
         ctk.CTkButton(
             card_sistema, text="📋  Histórico de eventos", width=260,
@@ -741,41 +1313,12 @@ class App(ctk.CTk):
             corner_radius=8,
         ).pack(padx=16, pady=(0, 8))
 
-        ctk.CTkButton(
-            card_sistema, text="🎯  Calibração", width=260,
-            command=lambda: self._mostrar_tela(
-                self.tela_calibracao, ao_entrar=self._preparar_tela_calibracao,
-            ),
-            fg_color=theme.GRAY_BTN, hover_color=theme.GRAY_BTN_HOVER,
-            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(13),
-            corner_radius=8,
-        ).pack(padx=16, pady=(0, 16))
-
-        # "Danger zone" separada visualmente num card próprio em vez de
-        # solta na tela — deixa claro que é uma área de risco à parte.
-        card_perigo = ctk.CTkFrame(
-            tela, fg_color=theme.BG_CARD, corner_radius=14,
-            border_width=1, border_color=theme.RED_DANGER,
-        )
-        card_perigo.pack(padx=24, pady=20, fill="x")
-
         ctk.CTkLabel(
-            card_perigo, text="Zona de risco", font=theme.font_corpo_bold(12),
-            text_color=theme.RED_DANGER,
-        ).pack(pady=(14, 8))
+            card_sistema, text="Calibre cada perfil antes de iniciar o monitor.",
+            font=theme.font_corpo(10), text_color=theme.TEXT_MUTED,
+        ).pack(padx=16, pady=(0, 14), anchor="w")
+        self._atualizar_status_perfil()
 
-        def remover():
-            auth.remover_senha_personalizada()
-            campo_senha.delete(0, "end")
-            label_feedback.configure(text="Senha removida.", text_color=theme.YELLOW_ALERT)
-            atualizar_status_senha()
-
-        ctk.CTkButton(
-            card_perigo, text="Remover senha", command=remover, width=260,
-            fg_color=theme.RED_DANGER, hover_color=theme.RED_DANGER_HOVER,
-            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(13),
-            corner_radius=8,
-        ).pack(pady=(0, 16))
 
     # ==================================================================
     # TELA DIAGNÓSTICO
@@ -786,6 +1329,7 @@ class App(ctk.CTk):
         "porta": "Porta aceitando conexões",
         "celular": "Celular conectado",
         "alarme": "Comando de teste enviado",
+        "confianca": "Confiança da detecção",
     }
 
     def _construir_tela_diagnostico(self, tela):
@@ -800,11 +1344,18 @@ class App(ctk.CTk):
         )
         self._label_diag_rodando.pack(pady=(0, 16))
 
+        # Frame de rolagem para comportar todo o conteúdo expandido
+        frame_scroll = ctk.CTkScrollableFrame(
+            tela, fg_color="transparent", corner_radius=0,
+        )
+        frame_scroll.pack(padx=24, fill="both", expand=True, pady=(0, 16))
+
+        # --- SEÇÃO: STATUS DA CONEXÃO ---
         frame_resultados = ctk.CTkFrame(
-            tela, fg_color=theme.BG_CARD, corner_radius=14,
+            frame_scroll, fg_color=theme.BG_CARD, corner_radius=14,
             border_width=1, border_color=theme.BORDER_CARD,
         )
-        frame_resultados.pack(padx=24, fill="x")
+        frame_resultados.pack(fill="x", pady=(0, 12))
 
         self._labels_diag: dict[str, ctk.CTkLabel] = {}
         for chave, texto in self._DIAGNOSTICO_TEXTOS.items():
@@ -815,33 +1366,104 @@ class App(ctk.CTk):
             lbl.pack(fill="x", padx=16, pady=8)
             self._labels_diag[chave] = lbl
 
+        # --- SEÇÃO: INFORMAÇÕES DO MONITOR ---
+        frame_monitor = ctk.CTkFrame(
+            frame_scroll, fg_color=theme.BG_CARD, corner_radius=14,
+            border_width=1, border_color=theme.BORDER_CARD,
+        )
+        frame_monitor.pack(fill="x", pady=(0, 12))
+
         ctk.CTkLabel(
-            tela, text='"Comando de teste enviado" confirma o envio,\nnão que o celular tocou o som.',
-            font=theme.font_corpo(11), text_color=theme.TEXT_MUTED, justify="center",
-        ).pack(pady=(10, 4))
+            frame_monitor, text="MONITOR", anchor="w",
+            font=theme.font_corpo_bold(12), text_color=theme.TEXT_PRIMARY,
+        ).pack(fill="x", padx=16, pady=(12, 8))
+
+        self._label_monitor_status = ctk.CTkLabel(
+            frame_monitor, text="", anchor="w", font=theme.font_corpo(11),
+            text_color=theme.TEXT_MUTED,
+        )
+        self._label_monitor_status.pack(fill="x", padx=16, pady=4)
+
+        self._label_monitor_confianca = ctk.CTkLabel(
+            frame_monitor, text="", anchor="w", font=theme.font_corpo(11),
+            text_color=theme.TEXT_MUTED,
+        )
+        self._label_monitor_confianca.pack(fill="x", padx=16, pady=4)
+
+        self._label_monitor_tempo = ctk.CTkLabel(
+            frame_monitor, text="", anchor="w", font=theme.font_corpo(11),
+            text_color=theme.TEXT_MUTED,
+        )
+        self._label_monitor_tempo.pack(fill="x", padx=16, pady=4)
+
+        self._label_monitor_tentativas = ctk.CTkLabel(
+            frame_monitor, text="", anchor="w", font=theme.font_corpo(11),
+            text_color=theme.TEXT_MUTED,
+        )
+        self._label_monitor_tentativas.pack(fill="x", padx=16, pady=(4, 12))
+
+        # --- SEÇÃO: ÚLTIMO FRAME ---
+        frame_captura = ctk.CTkFrame(
+            frame_scroll, fg_color=theme.BG_CARD, corner_radius=14,
+            border_width=1, border_color=theme.BORDER_CARD,
+        )
+        frame_captura.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            frame_captura, text="ÚLTIMO FRAME", anchor="w",
+            font=theme.font_corpo_bold(12), text_color=theme.TEXT_PRIMARY,
+        ).pack(fill="x", padx=16, pady=(12, 8))
+
+        self._label_diag_frame = ctk.CTkLabel(
+            frame_captura, text="", fg_color="#000000", corner_radius=8,
+        )
+        self._label_diag_frame.pack(pady=8, padx=8, fill="both", expand=True, ipady=60)
+
+        # --- SEÇÃO: HISTÓRICO DE ERROS ---
+        frame_erros = ctk.CTkFrame(
+            frame_scroll, fg_color=theme.BG_CARD, corner_radius=14,
+            border_width=1, border_color=theme.BORDER_CARD,
+        )
+        frame_erros.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            frame_erros, text="ERROS RECENTES", anchor="w",
+            font=theme.font_corpo_bold(12), text_color=theme.TEXT_PRIMARY,
+        ).pack(fill="x", padx=16, pady=(12, 8))
+
+        self._frame_diag_erros = ctk.CTkFrame(
+            frame_erros, fg_color="transparent",
+        )
+        self._frame_diag_erros.pack(fill="x", padx=16, pady=(0, 12))
+
+        # --- BOTÕES DE AÇÃO ---
+        frame_botoes = ctk.CTkFrame(tela, fg_color="transparent")
+        frame_botoes.pack(fill="x", padx=24, pady=(0, 12))
+
+        ctk.CTkButton(
+            frame_botoes, text="Rodar novamente", command=self._rodar_diagnostico, width=160,
+            fg_color=theme.GRAY_BTN, hover_color=theme.GRAY_BTN_HOVER,
+            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(13),
+            corner_radius=8,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            frame_botoes, text="🔄 Recalibrar", command=self._recalibrar_rapido,
+            fg_color=theme.ORANGE, hover_color=theme.ORANGE_HOVER,
+            text_color=theme.ORANGE_TEXT_ON, font=theme.font_corpo_bold(13),
+            corner_radius=8,
+        ).pack(side="left", fill="x", expand=True)
 
         self._label_diag_resumo = ctk.CTkLabel(tela, text="", font=theme.font_titulo(15))
         self._label_diag_resumo.pack(pady=10)
 
-        ctk.CTkButton(
-            tela, text="Rodar novamente", command=self._rodar_diagnostico, width=200,
-            fg_color=theme.GRAY_BTN, hover_color=theme.GRAY_BTN_HOVER,
-            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(13),
-            corner_radius=8,
-        ).pack(pady=(0, 20))
-
-    def _rodar_checagens_diagnostico(self) -> dict[str, bool | None]:
+    def _rodar_checagens_diagnostico(self) -> dict:
         """
-        Roda em thread separada (chamada por _rodar_diagnostico). Cada
-        valor é True/False, ou None quando o check não é aplicável
-        (ex.: não dá pra testar o alarme sem celular conectado).
-
-        IMPORTANTE sobre o check "alarme": ele só confirma que o
-        comando PARTIDA_ENCONTRADA foi enviado ao socket do celular --
-        não existe, hoje, uma confirmação vinda do Android de que o
-        som realmente tocou. "Enviado" != "recebido e tocado".
+        Roda em thread separada (chamada por _rodar_diagnostico). Retorna
+        um dict com resultado dos checks + informações do monitor para
+        diagnóstico expandido.
         """
-        resultados: dict[str, bool | None] = {}
+        resultados: dict = {}
 
         resultados["servidor"] = self._servidor is not None and self._servidor.is_alive()
 
@@ -862,6 +1484,27 @@ class App(ctk.CTk):
 
         resultados["celular"] = self._celulares_conectados > 0
 
+        # --- Informações do monitor ---
+        monitor_diag = {}
+        if self._monitor is not None and self._monitor.template is not None:
+            monitor_diag = self._monitor.obter_diagnostico()
+            try:
+                frame = np.array(self._monitor._ultima_captura) if hasattr(self._monitor, "_ultima_captura") else None
+                if frame is not None:
+                    resultados["confianca"] = MonitorPartida.calcular_confianca_maxima(
+                        cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY),
+                        self._monitor.template,
+                    )
+                else:
+                    resultados["confianca"] = None
+            except Exception:
+                resultados["confianca"] = None
+        else:
+            resultados["confianca"] = None
+
+        resultados["monitor_diag"] = monitor_diag
+        resultados["monitor_frame"] = self._monitor._ultima_captura if (self._monitor and hasattr(self._monitor, "_ultima_captura")) else None
+
         if resultados["servidor"] and resultados["celular"]:
             notificar_partida_encontrada()
             resultados["alarme"] = True
@@ -879,35 +1522,135 @@ class App(ctk.CTk):
         for chave, texto in self._DIAGNOSTICO_TEXTOS.items():
             self._labels_diag[chave].configure(text=f"○  {texto}", text_color=theme.TEXT_MUTED)
 
+        # Limpa campos do monitor
+        self._label_monitor_status.configure(text="")
+        self._label_monitor_confianca.configure(text="")
+        self._label_monitor_tempo.configure(text="")
+        self._label_monitor_tentativas.configure(text="")
+        self._label_diag_frame.configure(image="", text="Capturando...")
+        for w in self._frame_diag_erros.winfo_children():
+            w.destroy()
+
         def rodar():
             resultados = self._rodar_checagens_diagnostico()
 
             def aplicar():
                 self._label_diag_rodando.configure(text="")
                 for chave, ok in resultados.items():
-                    lbl = self._labels_diag[chave]
+                    if chave not in self._DIAGNOSTICO_TEXTOS:
+                        continue
+                    lbl = self._labels_diag.get(chave)
+                    if lbl is None:
+                        continue
                     texto = self._DIAGNOSTICO_TEXTOS[chave]
-                    if ok is None:
+                    if chave == "confianca" and ok is not None:
+                        lbl.configure(text=f"●  {texto}: {ok:.0%}", text_color=theme.BLUE if ok >= self._threshold else theme.YELLOW_ALERT)
+                    elif ok is None:
                         lbl.configure(text=f"—  {texto} (não aplicável)", text_color=theme.TEXT_MUTED)
                     elif ok:
                         lbl.configure(text=f"✓  {texto}", text_color=theme.GREEN_OK)
                     else:
                         lbl.configure(text=f"✕  {texto}", text_color=theme.RED_DANGER)
 
-                aplicaveis = [v for v in resultados.values() if v is not None]
-                if aplicaveis and all(aplicaveis):
+                # --- Atualiza informações do monitor ---
+                monitor_info = resultados.get("monitor_diag", {})
+                if monitor_info:
+                    status = "🟢 Ativo" if monitor_info.get("ativo") else "🔴 Inativo"
+                    self._label_monitor_status.configure(text=f"Status: {status}")
+
+                    conf = monitor_info.get("confianca_ultima", 0)
+                    self._label_monitor_confianca.configure(
+                        text=f"Confiança atual: {conf:.0%}",
+                        text_color=theme.GREEN_OK if conf >= self._threshold else theme.YELLOW_ALERT if conf >= self._threshold - 0.05 else theme.TEXT_MUTED
+                    )
+
+                    tempo_sem = monitor_info.get("tempo_sem_deteccao")
+                    if tempo_sem is not None:
+                        self._label_monitor_tempo.configure(text=f"Tempo sem detecção: {tempo_sem:.1f}s")
+                    else:
+                        self._label_monitor_tempo.configure(text="Tempo sem detecção: —")
+
+                    tent = monitor_info.get("tentativas_total", 0)
+                    erros = monitor_info.get("erros_total", 0)
+                    self._label_monitor_tentativas.configure(
+                        text=f"Tentativas: {tent} | Erros: {erros}"
+                    )
+
+                # --- Atualiza último frame ---
+                frame = resultados.get("monitor_frame")
+                if frame is not None:
+                    try:
+                        h, w = frame.shape[:2]
+                        escala = min(120 / h, 120 / w) if h > 0 and w > 0 else 1.0
+                        h_redim = max(1, int(h * escala))
+                        w_redim = max(1, int(w * escala))
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+                        img_pil = Image.fromarray(frame_rgb).resize((w_redim, h_redim), Image.Resampling.LANCZOS)
+                        foto = ImageTk.PhotoImage(img_pil)
+                        self._label_diag_frame.configure(image=foto, text="")
+                        self._label_diag_frame.image = foto
+                    except Exception as e:
+                        self._label_diag_frame.configure(text=f"Erro ao exibir frame: {e}", image="")
+
+                # --- Atualiza histórico de erros ---
+                erros_recentes = monitor_info.get("historico_erros_recentes", [])
+                if erros_recentes:
+                    for erro in erros_recentes[-5:]:
+                        tipo = erro.get("tipo", "DESCONHECIDO")
+                        desc = erro.get("descricao", "")[:50]
+                        lbl_erro = ctk.CTkLabel(
+                            self._frame_diag_erros,
+                            text=f"⚠ {tipo}: {desc}...",
+                            anchor="w", font=theme.font_corpo(10),
+                            text_color=theme.YELLOW_ALERT,
+                        )
+                        lbl_erro.pack(fill="x", pady=2)
+                else:
+                    lbl_nenhum = ctk.CTkLabel(
+                        self._frame_diag_erros,
+                        text="Nenhum erro registrado.",
+                        anchor="w", font=theme.font_corpo(10),
+                        text_color=theme.TEXT_MUTED,
+                    )
+                    lbl_nenhum.pack(fill="x", pady=2)
+
+                conf = resultados.get("confianca")
+                aplicaveis = [v for v in [resultados.get(k) for k in self._DIAGNOSTICO_TEXTOS.keys()] if v is not None]
+                if conf is not None and conf >= self._threshold:
+                    self._label_diag_resumo.configure(text="✓ SISTEMA PRONTO", text_color=theme.GREEN_OK)
+                elif conf is not None and conf >= self._threshold - 0.05:
+                    self._label_diag_resumo.configure(text="⚠ Confiança próxima do limite", text_color=theme.YELLOW_ALERT)
+                elif aplicaveis and all(v is True for v in aplicaveis if isinstance(v, bool)):
                     self._label_diag_resumo.configure(text="✓ SISTEMA PRONTO", text_color=theme.GREEN_OK)
                 else:
                     self._label_diag_resumo.configure(text="⚠ Verifique os itens acima", text_color=theme.YELLOW_ALERT)
 
-                # A altura pode ter mudado (linhas "não aplicável" têm o
-                # mesmo tamanho, mas por segurança recalcula de novo).
+                # A altura pode ter mudado
                 self.update_idletasks()
                 self.geometry(f"400x{self.tela_diagnostico.winfo_reqheight()}")
 
             self.after(0, aplicar)
 
         threading.Thread(target=rodar, daemon=True).start()
+        self._agendar_atualizacao_diagnostico()
+
+    def _agendar_atualizacao_diagnostico(self):
+        """Mantém os dados do diagnóstico atualizados somente nessa tela."""
+        if self._diagnostico_atualizacao_agendada:
+            return
+        self._diagnostico_atualizacao_agendada = True
+
+        def atualizar():
+            self._diagnostico_atualizacao_agendada = False
+            if self._encerrando or self.tela_diagnostico.winfo_manager() != "pack":
+                return
+            self._rodar_diagnostico()
+
+        self.after(2000, atualizar)
+
+    def _recalibrar_rapido(self):
+        """Abre a tela de calibração sem sair do fluxo de diagnóstico."""
+        self._mostrar_tela(self.tela_calibracao, ao_entrar=self._preparar_tela_calibracao)
 
     # ==================================================================
     # TELA CALIBRAÇÃO
@@ -979,17 +1722,53 @@ class App(ctk.CTk):
         frame_canvas_moldura.pack(pady=(0, 12))
         frame_canvas_moldura.pack_propagate(False)
 
-        # Canvas nativo do tkinter (CustomTkinter não tem widget de
-        # canvas) -- é o único jeito de desenhar a imagem capturada e
-        # o retângulo de seleção interativo.
         self._canvas_calibracao = tk.Canvas(
             frame_canvas_moldura, bg="#000000", highlightthickness=0,
             width=self._CANVAS_LARGURA_MAX, height=self._CANVAS_ALTURA_MAX,
         )
-        self._canvas_calibracao.pack(padx=2, pady=2)
+        self._canvas_calibracao.pack(side="left", padx=(2, 0), pady=2)
         self._canvas_calibracao.bind("<ButtonPress-1>", self._on_canvas_press)
         self._canvas_calibracao.bind("<B1-Motion>", self._on_canvas_drag)
         self._canvas_calibracao.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self._canvas_calibracao.bind("<MouseWheel>", self._on_canvas_wheel)
+        self._canvas_calibracao.bind("<Button-4>", self._on_canvas_wheel)
+        self._canvas_calibracao.bind("<Button-5>", self._on_canvas_wheel)
+
+        self._scroll_x_calibracao = tk.Scrollbar(
+            frame_canvas_moldura, orient="horizontal", command=self._canvas_calibracao.xview,
+        )
+        self._scroll_y_calibracao = tk.Scrollbar(
+            frame_canvas_moldura, orient="vertical", command=self._canvas_calibracao.yview,
+        )
+        self._scroll_x_calibracao.pack(side="bottom", fill="x")
+        self._scroll_y_calibracao.pack(side="right", fill="y")
+        self._canvas_calibracao.configure(
+            xscrollcommand=self._scroll_x_calibracao.set,
+            yscrollcommand=self._scroll_y_calibracao.set,
+        )
+
+        frame_zoom = ctk.CTkFrame(card, fg_color="transparent")
+        frame_zoom.pack(pady=(0, 8), padx=16, fill="x")
+
+        ctk.CTkButton(
+            frame_zoom, text="-", width=44, command=lambda: self._ajustar_zoom_calibracao(-1),
+            fg_color=theme.GRAY_BTN, hover_color=theme.GRAY_BTN_HOVER,
+            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(14),
+            corner_radius=8,
+        ).pack(side="left", padx=(0, 8))
+
+        self.label_zoom_calibracao = ctk.CTkLabel(
+            frame_zoom, text="Zoom: 100%", font=theme.font_corpo_bold(12),
+            text_color=theme.TEXT_MUTED,
+        )
+        self.label_zoom_calibracao.pack(side="left")
+
+        ctk.CTkButton(
+            frame_zoom, text="+", width=44, command=lambda: self._ajustar_zoom_calibracao(1),
+            fg_color=theme.GRAY_BTN, hover_color=theme.GRAY_BTN_HOVER,
+            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(14),
+            corner_radius=8,
+        ).pack(side="left", padx=(8, 0))
 
         self.btn_salvar_recorte = ctk.CTkButton(
             card, text="Salvar recorte", width=260, state="disabled",
@@ -1014,11 +1793,20 @@ class App(ctk.CTk):
             self._var_monitor.set("Nenhum monitor encontrado")
 
         r = self._regiao_atual
-        self.label_calibracao_status.configure(
-            text=f"Região atual: {r['width']}x{r['height']} px "
-                 f"(top={r['top']}, left={r['left']})",
-            text_color=theme.TEXT_MUTED,
-        )
+        if self._primeiro_uso or not calibracao.existe_calibracao_salva(self._perfil_ativo, self._evento_ativo):
+            self.label_calibracao_status.configure(
+                text=f"Primeiro uso: calibre \"{self._evento_ativo}\" antes de iniciar o monitoramento.",
+                text_color=theme.YELLOW_ALERT,
+            )
+            self.label_calibracao_dica.configure(
+                text="1. Abra a tela correta do jogo\n2. Captura o monitor\n3. Selecione o ícone/texto\n4. Salve a calibração para iniciar.",
+            )
+        else:
+            self.label_calibracao_status.configure(
+                text=f"Região atual de \"{self._evento_ativo}\": {r['width']}x{r['height']} px "
+                     f"(top={r['top']}, left={r['left']})",
+                text_color=theme.TEXT_MUTED,
+            )
 
         self._canvas_calibracao.delete("all")
         self._captura_atual_img = None
@@ -1026,6 +1814,74 @@ class App(ctk.CTk):
         self._recorte_canvas = None
         self._rect_id = None
         self.btn_salvar_recorte.configure(state="disabled")
+
+    def _redesenhar_captura_calibracao(self, foco=None):
+        if self._captura_atual_img is None:
+            return
+
+        escala_base = min(
+            self._CANVAS_LARGURA_MAX / self._captura_atual_img.width,
+            self._CANVAS_ALTURA_MAX / self._captura_atual_img.height,
+            1.0,
+        )
+        escala_total = escala_base * self._zoom_calibracao
+        largura = max(1, int(self._captura_atual_img.width * escala_total))
+        altura = max(1, int(self._captura_atual_img.height * escala_total))
+
+        img_exibida = self._captura_atual_img.resize((largura, altura))
+        self._captura_scale = escala_total
+        self._captura_photoimage = ImageTk.PhotoImage(img_exibida)
+
+        self._canvas_calibracao.delete("all")
+        self._canvas_calibracao.create_image(0, 0, anchor="nw", image=self._captura_photoimage)
+        self._canvas_calibracao.configure(scrollregion=(0, 0, largura, altura))
+
+        if foco is not None:
+            foco_x, foco_y = foco
+            vis_w = max(1, self._canvas_calibracao.winfo_width())
+            vis_h = max(1, self._canvas_calibracao.winfo_height())
+            x_max = max(1, largura - vis_w)
+            y_max = max(1, altura - vis_h)
+            xview = (foco_x - vis_w / 2) / x_max
+            yview = (foco_y - vis_h / 2) / y_max
+            self._canvas_calibracao.xview_moveto(max(0.0, min(1.0, xview)))
+            self._canvas_calibracao.yview_moveto(max(0.0, min(1.0, yview)))
+        else:
+            self._canvas_calibracao.xview_moveto(0)
+            self._canvas_calibracao.yview_moveto(0)
+
+        self.label_zoom_calibracao.configure(text=f"Zoom: {self._zoom_calibracao * 100:.0f}%")
+
+    def _ajustar_zoom_calibracao(self, passo: int, foco=None):
+        if self._captura_atual_img is None:
+            return
+
+        if passo > 0:
+            nova_zoom = min(5.0, self._zoom_calibracao * 1.25)
+        else:
+            nova_zoom = max(1.0, self._zoom_calibracao / 1.25)
+
+        if foco is None:
+            foco = (
+                self._canvas_calibracao.canvasx(self._canvas_calibracao.winfo_width() / 2),
+                self._canvas_calibracao.canvasy(self._canvas_calibracao.winfo_height() / 2),
+            )
+
+        self._zoom_calibracao = nova_zoom
+        self._redesenhar_captura_calibracao(foco)
+
+    def _on_canvas_wheel(self, event):
+        if self._captura_atual_img is None:
+            return
+
+        foco_x = self._canvas_calibracao.canvasx(event.x)
+        foco_y = self._canvas_calibracao.canvasy(event.y)
+
+        if getattr(event, "delta", 0) > 0:
+            self._ajustar_zoom_calibracao(1, foco=(foco_x, foco_y))
+        else:
+            self._ajustar_zoom_calibracao(-1, foco=(foco_x, foco_y))
+        return "break"
 
     def _iniciar_captura_calibracao(self):
         escolha = self._var_monitor.get()
@@ -1038,47 +1894,40 @@ class App(ctk.CTk):
         img, monitor = calibracao.capturar_monitor(mon_info["indice"])
         self._captura_atual_img = img
         self._captura_atual_monitor = monitor
+        self._zoom_calibracao = 1.0
 
-        escala = min(
-            self._CANVAS_LARGURA_MAX / img.width,
-            self._CANVAS_ALTURA_MAX / img.height,
-            1.0,  # nunca amplia, só reduz
-        )
-        self._captura_scale = escala
-        img_exibida = img.resize((max(1, int(img.width * escala)), max(1, int(img.height * escala))))
-        self._captura_photoimage = ImageTk.PhotoImage(img_exibida)
-
-        self._canvas_calibracao.delete("all")
-        self._canvas_calibracao.create_image(0, 0, anchor="nw", image=self._captura_photoimage)
+        self._redesenhar_captura_calibracao()
 
         self._recorte_canvas = None
         self._rect_id = None
         self.btn_salvar_recorte.configure(state="disabled")
         self.label_calibracao_dica.configure(
-            text="Arraste um retângulo sobre o texto/ícone\nde \"Partida Encontrada\" na imagem acima.",
+            text="Arraste um retângulo sobre o texto/ícone\nde \"Partida Encontrada\" na imagem acima.\nUse o mouse ou os botões + / - para ampliar.",
         )
 
     def _on_canvas_press(self, event):
         if self._captura_atual_img is None:
             return
-        self._rect_inicio = (event.x, event.y)
+        x, y = self._canvas_calibracao.canvasx(event.x), self._canvas_calibracao.canvasy(event.y)
+        self._rect_inicio = (x, y)
         if self._rect_id is not None:
             self._canvas_calibracao.delete(self._rect_id)
         self._rect_id = self._canvas_calibracao.create_rectangle(
-            event.x, event.y, event.x, event.y, outline=theme.ORANGE, width=2,
+            x, y, x, y, outline=theme.ORANGE, width=2,
         )
 
     def _on_canvas_drag(self, event):
         if self._rect_id is None or self._rect_inicio is None:
             return
         x0, y0 = self._rect_inicio
-        self._canvas_calibracao.coords(self._rect_id, x0, y0, event.x, event.y)
+        x1, y1 = self._canvas_calibracao.canvasx(event.x), self._canvas_calibracao.canvasy(event.y)
+        self._canvas_calibracao.coords(self._rect_id, x0, y0, x1, y1)
 
     def _on_canvas_release(self, event):
         if self._rect_inicio is None:
             return
         x0, y0 = self._rect_inicio
-        x1, y1 = event.x, event.y
+        x1, y1 = self._canvas_calibracao.canvasx(event.x), self._canvas_calibracao.canvasy(event.y)
         left, right = sorted((x0, x1))
         top, bottom = sorted((y0, y1))
         largura, altura = right - left, bottom - top
@@ -1112,22 +1961,148 @@ class App(ctk.CTk):
             left_real, top_real, left_real + largura_real, top_real + altura_real,
         ))
 
+        # Armazena os dados para mostrar na tela de preview
+        self._recorte_pendente = (
+            self._captura_atual_monitor,
+            left_real, top_real, largura_real, altura_real,
+            imagem_recortada,
+        )
+
+        # Mostra a tela de preview com antes/depois
+        self._mostrar_preview_calibracao(imagem_recortada)
+
+    def _mostrar_preview_calibracao(self, nova_imagem: Image.Image):
+        """Carrega o template antigo e exibe a comparação antes/depois."""
+        # Carrega o template antigo do evento ativo, se existir
+        imagem_antiga = None
+        try:
+            caminho_template = perfis.caminhos_evento_perfil(self._perfil_ativo, self._evento_ativo)["template"]
+            if not os.path.exists(caminho_template):
+                caminho_template = perfis.caminhos_perfil(self._perfil_ativo)["template"]
+            if os.path.exists(caminho_template):
+                imagem_antiga = Image.open(caminho_template)
+        except Exception:
+            pass  # Template corrompido ou inacessível
+
+        # Redimensiona ambas para caber no label
+        tamanho_max = 200
+
+        if imagem_antiga:
+            imagem_antiga_redim = imagem_antiga.copy()
+            imagem_antiga_redim.thumbnail((tamanho_max, tamanho_max), Image.Resampling.LANCZOS)
+            foto_antiga = ImageTk.PhotoImage(imagem_antiga_redim)
+            self._preview_label_antigo.configure(image=foto_antiga, text="")
+            self._preview_label_antigo.image = foto_antiga
+        else:
+            self._preview_label_antigo.configure(
+                text="Sem calibração anterior",
+                text_color=theme.TEXT_MUTED,
+                image=""
+            )
+
+        # Mostra o novo recorte
+        imagem_novo_redim = nova_imagem.copy()
+        imagem_novo_redim.thumbnail((tamanho_max, tamanho_max), Image.Resampling.LANCZOS)
+        foto_novo = ImageTk.PhotoImage(imagem_novo_redim)
+        self._preview_label_novo.configure(image=foto_novo, text="")
+        self._preview_label_novo.image = foto_novo
+
+        # Mostra a tela de preview
+        self._mostrar_tela(self.tela_preview_calibracao)
+
+    # ==================================================================
+    # TELA PREVIEW CALIBRAÇÃO (antes/depois)
+    # ==================================================================
+    def _construir_tela_preview_calibracao(self, tela):
+        self._cabecalho_com_voltar(
+            tela, "COMPARAR CALIBRAÇÃO",
+            ao_voltar=lambda: self._mostrar_tela(self.tela_calibracao),
+        )
+
+        ctk.CTkLabel(
+            tela, text="Template anterior vs. novo recorte",
+            font=theme.font_corpo_bold(12), text_color=theme.TEXT_PRIMARY,
+        ).pack(pady=(0, 16), padx=20)
+
+        # Frame com dois subframes lado a lado
+        frame_comparacao = ctk.CTkFrame(tela, fg_color="transparent")
+        frame_comparacao.pack(padx=24, fill="both", expand=True)
+
+        # Coluna esquerda (anterior)
+        frame_esq = ctk.CTkFrame(frame_comparacao, fg_color=theme.BG_CARD, corner_radius=8,
+                                 border_width=1, border_color=theme.BORDER_CARD)
+        frame_esq.pack(side="left", fill="both", expand=True, padx=(0, 8))
+
+        ctk.CTkLabel(frame_esq, text="ANTERIOR", font=theme.font_corpo_bold(11),
+                     text_color=theme.TEXT_MUTED).pack(pady=(12, 8))
+
+        self._preview_label_antigo = ctk.CTkLabel(frame_esq, text="", fg_color="#000000")
+        self._preview_label_antigo.pack(pady=8, padx=8, fill="both", expand=True)
+
+        # Coluna direita (novo)
+        frame_dir = ctk.CTkFrame(frame_comparacao, fg_color=theme.BG_CARD, corner_radius=8,
+                                 border_width=2, border_color=theme.ORANGE)
+        frame_dir.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        ctk.CTkLabel(frame_dir, text="NOVO", font=theme.font_corpo_bold(11),
+                     text_color=theme.ORANGE).pack(pady=(12, 8))
+
+        self._preview_label_novo = ctk.CTkLabel(frame_dir, text="", fg_color="#000000")
+        self._preview_label_novo.pack(pady=8, padx=8, fill="both", expand=True)
+
+        # Botões de ação
+        frame_botoes = ctk.CTkFrame(tela, fg_color="transparent")
+        frame_botoes.pack(pady=(16, 20), fill="x", padx=24)
+
+        ctk.CTkButton(
+            frame_botoes, text="← Fazer novo recorte", command=self._voltar_para_calibracao,
+            fg_color=theme.GRAY_BTN, hover_color=theme.GRAY_BTN_HOVER,
+            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(12),
+            corner_radius=8, width=130,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            frame_botoes, text="✓ Confirmar e salvar", command=self._confirmar_preview_calibracao,
+            fg_color=theme.GREEN_OK, hover_color=theme.GREEN_OK_HOVER,
+            text_color=theme.TEXT_PRIMARY, font=theme.font_corpo_bold(12),
+            corner_radius=8,
+        ).pack(side="left", fill="x", expand=True)
+
+    def _voltar_para_calibracao(self):
+        self._mostrar_tela(self.tela_calibracao)
+
+    def _confirmar_preview_calibracao(self):
+        """Salva definitivamente o recorte pendente e volta pra tela de calibração."""
+        if self._recorte_pendente is None:
+            return
+
+        monitor, left_real, top_real, largura_real, altura_real, imagem_recortada = self._recorte_pendente
+
         regiao = calibracao.salvar_calibracao(
-            monitor=self._captura_atual_monitor,
+            monitor=monitor,
             recorte_left=left_real, recorte_top=top_real,
             recorte_width=largura_real, recorte_height=altura_real,
             imagem_recortada=imagem_recortada,
+            nome_perfil=self._perfil_ativo,
+            nome_evento=self._evento_ativo,
         )
 
-        # Efeito imediato -- não precisa fechar e reabrir o app pra um
-        # "Iniciar" novo já usar a região recém-calibrada.
         self._regiao_atual = regiao
+        self._primeiro_uso = False
+        self._recorte_pendente = None
+        self._atualizar_status_perfil()
+        self._registrar_evento(
+            tipo_evento=eventos.TipoEvento.CALIBRACAO_ALTERADA,
+            descricao_extra=self._perfil_ativo,
+        )
 
         self.label_calibracao_status.configure(
             text=f"✓ Calibrado agora: {regiao['width']}x{regiao['height']} px",
             text_color=theme.GREEN_OK,
         )
-        self.btn_salvar_recorte.configure(state="disabled")
+        self.label_status.configure(text="● Pronto para iniciar", text_color=theme.BLUE)
+
+        self._mostrar_tela(self.tela_calibracao)
 
     # ==================================================================
     # TELA HISTÓRICO
@@ -1188,6 +2163,7 @@ class App(ctk.CTk):
         self._atualizar_lista_historico()
 
     def _ao_fechar(self):
+        self._encerrando = True
         self.parar()
         self._parar_servidor()
         self.destroy()

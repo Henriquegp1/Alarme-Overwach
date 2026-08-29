@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+import calibracao
 import config
 
 

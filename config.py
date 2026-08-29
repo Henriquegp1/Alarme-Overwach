@@ -91,6 +91,28 @@ def salvar_threshold(valor: float) -> None:
     dados["threshold"] = min(0.90, max(0.70, round(float(valor), 2)))
     salvar_json_atomico(ARQUIVO_CONFIG, dados)
 
+
+def carregar_qr_oculto() -> bool:
+    """Retorna se o QR code deve entrar oculto por padrão."""
+    try:
+        with open(ARQUIVO_CONFIG, "r", encoding="utf-8") as arquivo:
+            dados = json.load(arquivo)
+        return bool(dados.get("qr_oculto", False))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def salvar_qr_oculto(valor: bool) -> None:
+    """Persiste o estado do QR code para lembrar a escolha do usuário."""
+    os.makedirs(os.path.dirname(ARQUIVO_CONFIG), exist_ok=True)
+    try:
+        with open(ARQUIVO_CONFIG, "r", encoding="utf-8") as arquivo:
+            dados = json.load(arquivo)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        dados = {}
+    dados["qr_oculto"] = bool(valor)
+    salvar_json_atomico(ARQUIVO_CONFIG, dados)
+
 # Região da tela a capturar (em pixels), no formato exigido pelo mss.
 # ATENÇÃO: esses valores são placeholders. Você precisa calibrar isso
 # tirando um print da tela "Partida Encontrada" e anotando a posição/tamanho

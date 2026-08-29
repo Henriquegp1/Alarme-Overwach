@@ -1,383 +1,301 @@
 # Overwatch Match Alarm
 
-Sistema de duas partes que detecta quando uma partida do Overwatch é
-encontrada e dispara um alarme (som + vibração) no celular, mesmo com
-a tela apagada ou o app em segundo plano.
+Aplicativo para Windows que detecta a tela **Partida Encontrada** do
+Overwatch por captura de tela e envia um alarme para celulares conectados
+na mesma rede local.
 
-- **Cliente PC (Python)**: monitora a tela via captura de imagem,
-  detecta "Partida Encontrada" por template matching, avisa o celular
-  pela rede local.
-- **App Mobile (Android/Java — "OwAlarm")**: fica conectado ao PC e,
-  ao receber o aviso, toca um som (configurável) e vibra — e manda de
-  volta uma confirmação em JSON dizendo que o som tocou de fato.
+O projeto não acessa a memória do jogo e não injeta código. A detecção usa
+somente captura de tela, `mss` e template matching do OpenCV.
 
-> **Requisito não-negociável:** o sistema não interage com a memória
-> do jogo em nenhum momento — só captura de tela. Isso é proposital,
-> para não arriscar ban por anti-cheat.
+## Como funciona
 
----
+- **Cliente PC:** interface CustomTkinter, captura de tela, calibração,
+  template matching e servidor WebSocket autenticado.
+- **Celular Android:** aplicativo complementar `OwAlarm`, que recebe o aviso,
+  toca o som configurado e vibra mesmo em segundo plano ou com a tela apagada.
+- **Confirmação:** o celular envia uma resposta JSON depois de tocar o alarme;
+  essa confirmação aparece no diagnóstico e no histórico do PC.
 
-## Estrutura de arquivos (Cliente PC)
+Este repositório contém o cliente PC. O código do aplicativo Android é
+distribuído separadamente.
 
-```
-overwatch_alarm_pc/
-├── main.py             # ponto de entrada
-├── gui.py               # interface CustomTkinter + orquestração + navegação por telas
-├── server.py             # FastAPI + WebSocket (autenticado), roda em thread própria
-├── auth.py                # token de sessão + senha personalizada (hash+salt) + rate limiting
-├── monitor.py              # captura de tela (mss) + template matching (OpenCV)
-├── calibracao.py            # lista monitores, captura tela, salva região+template pela GUI
-├── config.py                # constantes ajustáveis + leitura da calibração salva
-├── theme.py                  # paleta de cores e identidade visual centralizada
-├── utils.py                   # descoberta de IP local
-├── scripts/                      # ferramentas manuais/legadas
-│   ├── __init__.py               # permite executar scripts como módulo
-│   ├── calibrar_regiao.py        # gera região e template fora da GUI
-│   ├── listar_monitores.py       # lista monitores disponíveis
-│   └── teste_matching.py         # testa o template matching
-├── tests/                        # testes automatizados
-│   ├── test_auth.py              # testes de auth.py
-│   ├── test_config.py            # testes da persistência
-│   └── test_server.py            # testes do servidor WebSocket
-├── version.py                     # versão única do aplicativo
-├── build_release.ps1              # build do executável e instalador
-├── requirements.txt
-├── requirements-dev.txt           # dependências extras para testes
-├── installer/
-│   └── TalonMatchAlarm.iss         # script do instalador Inno Setup
-└── assets/
-    └── template_partida_encontrada.png   # gerado pela tela de Calibração (ou manualmente)
-```
+## Requisitos
 
-Os arquivos graváveis não ficam mais na árvore do projeto: no Windows,
-eles são mantidos em `%APPDATA%\OwAlarm` (ver a seção abaixo).
+- Windows 10 ou 11 para usar o executável e o fluxo principal.
+- Python 3.10 ou superior para executar pelo código-fonte.
+- Overwatch e o celular conectados à mesma rede local.
+- Inno Setup 6 somente para gerar o instalador Windows.
 
-## Identidade visual
+## Instalação pelo código-fonte
 
-Mesma paleta usada no PC e no app Android:
-
-| Papel               | Cor       |
-|---------------------|-----------|
-| Fundo                | `#131415` / `#1C1E20` |
-| Ação primária (laranja) | `#F99E1A` — uma só por tela |
-| Apoio (azul)          | `#3E9BD9` |
-| Neutro (cinza)         | `#33373A` |
-
----
-
-## Passo 1 — Instalar dependências (Cliente PC)
-
-```bash
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-Para preparar também o ambiente de testes, instale as dependências de
-desenvolvimento:
+No PowerShell, na pasta do projeto:
 
 ```powershell
-pip install -r requirements-dev.txt
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-### Onde ficam os dados salvos
+Para instalar também as dependências de desenvolvimento:
 
-No Windows, as configurações, credenciais e o template calibrado ficam
-em `%APPDATA%\OwAlarm`. Isso é separado do executável porque esses
-arquivos precisam ser graváveis e continuar existindo quando uma nova
-versão do `.exe` for instalada. Na primeira execução, os arquivos
-antigos encontrados na pasta do projeto são migrados automaticamente.
+```powershell
+python -m pip install -r requirements-dev.txt
+```
 
-Os arquivos dentro de `assets/` são recursos do programa; o template
-usado pelo monitor é uma cópia persistente em `%APPDATA%\OwAlarm`, por
-isso uma nova calibração não é perdida nem tenta alterar o conteúdo
-interno do `.exe`.
+## Perfis de jogos
 
-As configurações, credenciais e calibrações são gravadas de forma
-atômica: o sistema termina de escrever um arquivo temporário e só
-depois substitui o arquivo anterior. Assim, uma queda de energia ou
-encerramento forçado não costuma deixar um JSON pela metade.
+O aplicativo suporta calibrações independentes para vários jogos. Os perfis
+`Overwatch`, `Dead by Daylight` e `Valorant` ficam disponíveis desde o início;
+`Overwatch` recebe a calibração existente durante a migração. DBD e Valorant
+começam sem template e precisam de calibração própria. Para adicionar outro
+jogo, use o botão `+` ao lado de **Perfil do jogo**, informe um nome, selecione
+o monitor e faça a calibração própria.
 
-## Passo 2 — Calibrar (pela GUI, recomendado)
+Cada perfil mantém sua região de busca e seu template separados. Assim, a
+calibração do Overwatch não é substituída pela calibração do Dead by Daylight,
+Valorant ou qualquer outro jogo. Perfis criados pelo usuário começam simples
+e funcionais. O seletor de perfis fica em **Configurações**, mantendo a tela
+principal enxuta. O cabeçalho e o badge visual mostram o perfil atual, sem
+mover o botão `+` ou o campo de seleção quando o nome muda.
 
-O código não funciona sem isso. Rode `python main.py`, abra
-**Configurações → 🎯 Calibração** e siga o fluxo:
+Os perfis principais possuem uma identidade visual discreta. Perfis criados
+pelo usuário usam a aparência neutra e mostram as iniciais do nome no badge.
 
-1. Escolha o monitor onde o Overwatch está rodando.
-2. Clique em **"Capturar e ajustar"** — tira um print daquele monitor.
-3. Arraste um retângulo sobre o texto/ícone de "Partida Encontrada".
-4. Clique em **"Salvar recorte"**.
+### Identidade visual e eventos por perfil
 
-Esse único gesto já salva a região de captura **e** o template ao
-mesmo tempo — não precisa rodar duas partidas nem editar coordenadas
-na mão. A região salva já vale pro próximo "Iniciar" sem precisar
-reabrir o app, e pode ser refeita quantas vezes quiser (o jogo mudou
-de resolução, você trocou de monitor, etc.) sem reinstalar nada.
+A interface foi refinada para deixar cada jogo reconhecível visualmente:
 
-> **Nota técnica:** a região de captura salva é sempre um pouco maior
-> que o recorte exato (margem de ~20px ao redor). Isso dá espaço pro
-> algoritmo de matching (`cv2.matchTemplate`) "deslizar" e achar o
-> melhor alinhamento — sem essa margem, qualquer diferença de 1 pixel
-> entre o instante da calibração e uma partida real derruba a
-> confiança do match.
+- perfis oficiais exibem a logo do jogo ao lado do nome;
+- perfis personalizados continuam com um badge neutro e inicial do nome;
+- cada perfil agora pode ter múltiplos eventos, comportando-se como uma
+  cópia do perfil principal em uma área dedicada abaixo do seletor;
+- a criação e a exclusão de eventos ficam integradas ao painel de
+  configurações, sem espalhar a interface lateralmente;
+- os eventos usam a mesma lógica de perfil (nome, região, template e
+  calibragem), mas podem ser organizados e alternados individualmente.
 
-### Alternativa (legado): calibrar por fora da GUI
+Isso mantém o fluxo de uso mais enxuto, facilita a troca entre cenários de
+jogo e evita que a tela de configurações se torne confusa ou desproporcional.
 
-Os scripts `scripts/calibrar_regiao.py`, `scripts/listar_monitores.py`
-e `scripts/teste_matching.py` continuam funcionando pra quem preferir calibrar
-manualmente fora da interface. Nesse fluxo:
+## Primeiro uso
 
-1. Deixe o jogo na tela exata do momento "Partida Encontrada".
-2. Rode `python -m scripts.calibrar_regiao`.
-3. Se necessário, altere `INDICE_MONITOR` no script para o monitor
-  correto e execute-o novamente.
-4. Recorte a região onde aparece o texto/ícone; o script salva região
-  e template diretamente em `%APPDATA%\OwAlarm`.
+1. Inicie o cliente:
 
-Use `python -m scripts.teste_matching` para validar o matching isoladamente.
+   ```powershell
+   python main.py
+   ```
 
-Para executar os testes automatizados:
+2. Na primeira execução, permita a porta TCP `8000` no Firewall do Windows
+   para redes privadas.
+3. Abra **Configurações > Ferramentas do sistema > Calibração**.
+4. Deixe o Overwatch na tela **Partida Encontrada**, selecione o monitor,
+   capture a tela, marque o texto ou ícone e salve o recorte.
+5. No celular, leia o QR Code exibido no PC ou informe manualmente o IP e a
+   porta. Use o token e, se configurada, a senha personalizada.
+6. Use **Testar alarme** para confirmar a conexão antes de clicar em
+   **Iniciar**.
+
+O servidor WebSocket é iniciado quando a interface abre. O botão **Iniciar**
+controla apenas a captura e a detecção. Sem uma calibração válida, o início
+da captura é bloqueado. Ao trocar de perfil, a interface permanece na tela
+principal; a tela de calibração só abre quando solicitada ou quando o usuário
+tenta iniciar um perfil ainda não calibrado.
+
+## Calibração
+
+A calibração da interface salva a região da tela e o template em uma única
+operação. A região recebe uma margem para permitir pequenas diferenças de
+alinhamento durante o template matching.
+
+Se a resolução, a escala, o monitor ou a posição do jogo mudar, faça uma
+nova calibração. O limiar padrão é `0.80` e pode ser ajustado nas
+configurações, entre `0.70` e `0.90`, para reduzir falsos positivos ou
+negativos.
+
+Também é possível usar os scripts auxiliares:
+
+```powershell
+python -m scripts.listar_monitores
+python -m scripts.calibrar_regiao
+python -m scripts.teste_matching
+```
+
+## Conexão e segurança
+
+- A porta padrão do servidor é `8000`.
+- Um token de sessão é gerado a cada início do programa e também é incluído
+  no QR Code.
+- A senha personalizada é opcional, exige pelo menos quatro caracteres e não
+  pode conter espaços.
+- A nova senha precisa ser digitada duas vezes antes de ser salva e é
+  armazenada como hash com salt usando PBKDF2.
+- Quando uma senha está configurada, o token ou a senha podem autenticar a
+  conexão; não é necessário informar os dois.
+- Ao trocar o token ou a senha, os celulares conectados são desconectados e
+  precisam autenticar novamente.
+- Clientes Android que suportam sessões identificadas devem enviar, depois
+  de conectar, `{"tipo":"registrar_dispositivo","device_id":"..."}`.
+  Uma nova conexão com o mesmo `device_id` encerra a sessão anterior e recebe
+  `{"tipo":"dispositivo_registrado",...}` como confirmação.
+- Clientes antigos, sem `device_id`, continuam compatíveis, mas não podem
+  ser diferenciados em caso de conexão duplicada.
+- Após cinco falhas em 60 segundos, o IP fica bloqueado por cinco minutos.
+- O servidor verifica conexões silenciosas por ping; o botão de atualização
+  do status força uma verificação imediata.
+- Um `device_id` opcional permite manter apenas uma sessão por dispositivo.
+  Se o mesmo dispositivo conectar novamente, a sessão anterior é encerrada
+  com motivo informado.
+
+## Dados persistentes
+
+No Windows, os dados graváveis ficam em:
+
+```text
+%APPDATA%\OwAlarm
+```
+
+Ali são armazenados:
+
+- `config.json`: limiar de detecção e configurações;
+- `credentials.json`: credenciais protegidas;
+- `template_partida_encontrada.png`: template calibrado.
+
+Os logs do aplicativo ficam em `owalarm.log`, com rotação automática e até
+três arquivos de backup.
+
+Os arquivos dos jogos ficam em `%APPDATA%\OwAlarm\perfis\<nome-do-jogo>`.
+
+Os arquivos são gravados de forma atômica. Atualizar ou desinstalar o
+programa não deve apagar a calibração, a senha ou o template.
+
+## Refinamentos recentes da interface
+
+Além das funcionalidades de detecção e calibração, a interface passou por
+um conjunto de ajustes focados em ergonomia e consistência visual:
+
+- a janela inicial foi compactada para abrir sem desperdício de espaço;
+- a tela de configurações usa scroll nativo do sistema, sem barras visuais
+  exageradas ou customizadas que quebram a aparência;
+- o QR code pode ser ocultado e o estado é lembrado entre execuções do app;
+- o painel de senha foi reorganizado para manter a ação de "Alterar senha"
+  junto ao formulário de senha, em vez de deixar a remoção em uma zona de risco
+  separada e confusa;
+- os cards de perfis e eventos foram reorganizados para manter a hierarquia
+  visual e facilitar a navegação com menos esforço visual;
+- a área de configuração foi ajustada para manter a leitura e o uso mais
+  confortáveis em monitores com menos altura ou em janelas menores.
+
+Esses refinamentos fazem parte do fluxo atual do produto e fazem o sistema
+parecer mais natural, estável e melhor alinhado ao uso real em desktop.
+
+## Diagnóstico e histórico
+
+A tela de diagnóstico verifica servidor, IP, porta, celular conectado e a
+confirmação de que o alarme foi tocado. Enquanto está aberta, ela atualiza os
+dados a cada dois segundos e mostra último frame, confiança atual, tempo sem
+detecção, estado do monitor, validade do template, cooldown e erros recentes.
+
+O histórico mantém os 50 eventos mais recentes em memória, incluindo conexão
+perdida, ausência de celular, falhas de captura e matching, template inválido,
+senha alterada, token rotacionado, sessão duplicada, detecção em cooldown e
+reinício do monitor. O histórico é apagado ao fechar o programa.
+
+Falhas recuperáveis de captura, matching, callbacks, servidor e monitor são
+registradas sem encerrar o aplicativo. Os watchdogs do servidor e do monitor
+usam backoff progressivo para evitar tentativas agressivas de reinício.
+
+## Testes
+
+Com a virtualenv ativada:
 
 ```powershell
 python -m pytest -q
 ```
 
-## Passo 3 — Rodar
+Os testes cobrem autenticação, servidor WebSocket, persistência de
+configurações, perfis de jogos, captura/template matching, callbacks e
+controle de sessões duplicadas.
 
-```bash
-python main.py
-```
+## Rotina para cada alteração
 
-## Downloads
+Use esta sequência sempre que uma melhoria for implementada:
 
-As versões prontas para instalação ficam na página de Releases do GitHub:
+1. Revisar o código relacionado e identificar o ponto que controla o
+  comportamento.
+2. Fazer a menor alteração possível, preservando mudanças locais já feitas.
+3. Criar ou atualizar um teste específico para o comportamento alterado.
+4. Executar primeiro o teste específico:
 
-https://github.com/Henriquegp1/App-Alarme/releases
+  ```powershell
+  .\venv\Scripts\python.exe -m pytest -q tests\test_arquivo.py
+  ```
 
-Na release desejada:
-
-- Usuários do Windows devem baixar `TalonMatchAlarm-Setup-VERSAO.exe`.
-- Usuários do Android devem baixar o APK de release publicado, por exemplo
-  `app-release.apk`.
-
-O instalador do Windows configura o programa, cria os atalhos e a regra
-necessária do Firewall. O APK instala o aplicativo no celular. Não é
-necessário baixar o código-fonte, a pasta `build` ou arquivos de debug.
-
-O servidor WebSocket sobe **assim que o app abre** (não só ao clicar
-Iniciar) — isso é intencional: é esse momento que faz o Windows
-Firewall perguntar se pode liberar a porta, e queremos essa pergunta
-acontecendo de forma previsível na abertura do app, não em um momento
-variável dependendo de já ter calibrado ou não. **Na primeira
-execução em uma máquina, aceite a permissão do Firewall** — sem isso
-o celular nunca vai conseguir se conectar.
-
-Na tela principal:
-
-- **QR Code e IP local**, prontos assim que o app abre.
-- **Botão "Iniciar"** — liga só a captura de tela/matching (o
-  servidor já está de pé desde a abertura). Antes de calibrar, dá erro
-  "Erro no Template" — calibre primeiro.
-- **Botão "Testar alarme"** — disponível assim que o app abre, não
-  depende de estar monitorando.
-- **Status de conexão em tempo real** (Servidor + Celular), com
-  bolinha colorida por estado (verde/cinza/preta), quantidade de
-  celulares conectados e atualização instantânea. O sistema envia o
-  alarme para todos os celulares conectados.
-- **Botão 🔄** ao lado do status do celular — força uma verificação
-  ativa e imediata da conexão (manda um ping e espera confirmação),
-  em vez de esperar o ciclo passivo de detecção (~30-45s).
-- **Cooldown visível** — depois de uma partida encontrada, a tela mostra
-  a contagem regressiva de cinco segundos antes de permitir outra detecção.
-
-## Gerar o instalador Windows
-
-O executável e o instalador são gerados em duas etapas. Com a venv
-ativada, rode:
-
-```powershell
-python -m PyInstaller TalonMatchAlarm.spec
-iscc installer\TalonMatchAlarm.iss
-```
-
-Para gerar uma release usando a versão de `version.py`, use:
-
-```powershell
-.\build_release.ps1
-```
-
-Antes de publicar, altere somente `VERSAO` em `version.py` seguindo o
-formato `MAJOR.MINOR.PATCH` (por exemplo, `1.1.0`). O script repassa o
-mesmo valor para o instalador e o aplicativo o mostra no título da
-janela.
-
-O executável fica em `dist/TalonMatchAlarm.exe` e o instalador em
-`releases/`. O script do Inno Setup cria atalhos, registra a
-desinstalação e libera a porta TCP 8000 somente no perfil de rede
-privado do Windows. O instalador precisa ser executado como
-administrador para criar essa regra de firewall.
-
-Os dados do usuário continuam em `%APPDATA%\OwAlarm`; desinstalar ou
-atualizar o programa não apaga calibração, senha ou template.
-
-### Atualizar e publicar uma nova versão
-
-Siga estes passos sempre que fizer alterações no projeto:
-
-1. Execute os testes:
+5. Executar a suíte completa:
 
   ```powershell
   .\venv\Scripts\python.exe -m pytest -q
   ```
 
-2. Altere somente `VERSAO` em `version.py`, usando uma versão maior que a
-  anterior, por exemplo `1.0.0` para `1.0.1`.
-3. Gere o executável e o instalador:
+6. Compilar os módulos Python alterados:
 
   ```powershell
-  .\build_release.ps1
+  .\venv\Scripts\python.exe -m py_compile arquivo.py
   ```
 
-4. Confirme se o novo arquivo `TalonMatchAlarm-Setup-VERSAO.exe` apareceu em
-  `releases/`. Não envie as pastas `build/`, `dist/`, `releases/` ou `venv/`
-  para o GitHub.
-5. Registre e publique as alterações:
+7. Atualizar este README quando o comportamento, o protocolo ou o fluxo de
+  uso mudar.
+8. Conferir os arquivos alterados antes de gerar uma release.
 
-  ```powershell
-  git add -A
-  git commit -m "prepara versao VERSAO"
-  git push origin main
-  ```
+## Gerar o instalador Windows
 
-6. Envie para os usuários o instalador da pasta `releases/`. Eles devem
-  executá-lo sobre a instalação anterior. O mesmo `AppId` faz o Windows
-  reconhecer a instalação como uma atualização, mantendo os dados em
-  `%APPDATA%\OwAlarm`.
+Instale o [Inno Setup 6](https://jrsoftware.org/isinfo.php) e mantenha a
+virtualenv ativada. Para gerar o executável e o instalador:
 
-## Autenticação
+```powershell
+.\build_release.ps1
+```
 
-O WebSocket exige autenticação antes de aceitar a conexão:
+O script:
 
-- **Token de sessão**: gerado automaticamente a cada início do
-  programa (em memória, via `secrets`), embutido no QR Code.
-- **Ao gerar um novo token**, qualquer celular já conectado é
-  desconectado imediatamente; é preciso conectar novamente usando o
-  QR Code ou código atualizado.
-- **Senha personalizada (opcional)**: configurável na tela de
-  Configurações, persistida como hash+salt (PBKDF2) em
-  `%APPDATA%\OwAlarm\credentials.json`.
-- As duas credenciais funcionam simultaneamente — nenhuma tem
-  prioridade sobre a outra.
-- **Ao salvar uma senha nova**, qualquer celular já conectado é
-  desconectado automaticamente na hora — evita sessões antigas
-  ficarem "penduradas" com a credencial antiga.
-- **Rate limiting por IP** contra força bruta: bloqueia após 5
-  tentativas erradas em 60 segundos, por 5 minutos. Se o celular
-  ficar tentando reconectar sozinho com uma senha errada (ex.: você
-  trocou a senha e esqueceu de atualizar no celular), pode acionar
-  esse bloqueio — nesse caso, o Histórico registra o bloqueio e o tempo
-  restante. Espere esse período expirar antes de tentar de novo com a
-  senha certa.
+1. lê a versão de `version.py`;
+2. gera o executável com PyInstaller;
+3. executa o compilador `ISCC.exe` do Inno Setup;
+4. grava o instalador em `releases/`.
 
-## Robustez de conexão
+Antes de uma release, altere somente `VERSAO` em `version.py`, seguindo
+`MAJOR.MINOR.PATCH`, e rode os testes:
 
-Detectar que um celular desconectou não é trivial em WebSocket — o
-TCP nem sempre avisa quando o outro lado sumiu (Wi-Fi caiu, app
-morto à força, etc.). O sistema trata isso em duas camadas:
+```powershell
+.\venv\Scripts\python.exe -m pytest -q
+.\build_release.ps1
+```
 
-1. **Passiva**: se uma conexão fica 15s em silêncio, o servidor manda
-   um ping; sem resposta depois de 2 tentativas (~30-45s no total), a
-   conexão é considerada morta e removida.
-2. **Ativa**: o botão 🔄 força essa checagem na hora, sem esperar o
-   ciclo passivo.
-3. **No app Android**: qualquer edição nos campos de IP/Senha, estando
-   conectado, já desconecta a sessão atual imediatamente — evita
-   ambiguidade entre "o que a tela mostra" e "o que está realmente
-   conectado".
+O instalador configura atalhos, desinstalação e a regra do Firewall para a
+porta `8000` no perfil de rede privado. Os diretórios `build/`, `dist/`,
+`releases/` e `venv/` não devem ser enviados ao GitHub.
 
-O aviso de partida é agendado pela thread de captura, mas a lista de
-celulares é consultada somente dentro do event loop do servidor. Isso
-evita uma condição de corrida em que o celular poderia desconectar
-entre a verificação e o envio do alarme.
+## Estrutura principal
 
-## Diagnóstico
+```text
+main.py                 ponto de entrada
+gui.py                  interface e fluxo das telas
+server.py               servidor FastAPI/WebSocket
+auth.py                 token, senha e rate limiting
+monitor.py              captura e template matching
+calibracao.py           calibração pela interface
+config.py               configurações e dados persistentes
+eventos.py              tipos do histórico e diagnóstico
+notificacoes.py         notificações de desktop
+scripts/                ferramentas auxiliares
+tests/                  testes automatizados
+installer/              script do Inno Setup
+```
 
-Tela dedicada com checks automáticos: servidor, IP, porta, celular
-conectado, e confirmação de que o alarme foi de fato tocado no
-celular (via a resposta JSON que o app manda de volta) — não apenas
-que o comando foi enviado.
+## Downloads
 
-## Histórico
+Versões prontas ficam na página de releases:
 
-Tela de log com os últimos 50 eventos (em memória, sem persistência
-em disco — reseta ao fechar o programa): servidor iniciado/parado,
-celular conectado/desconectado, partida encontrada (alarme real),
-teste de alarme enviado, confirmação de alarme tocado. Botão "Limpar
-histórico" disponível.
+<https://github.com/Henriquegp1/App-Alarme/releases>
 
-## Validação prática
-
-O fluxo completo foi validado em uso real:
-
-- conexão entre o PC e o celular;
-- teste manual do alarme;
-- calibração da região de captura;
-- detecção de uma partida real na tela.
-
-Além disso, a suíte automatizada cobre autenticação, servidor WebSocket,
-persistência de configurações e gravação atômica dos arquivos.
-
----
-
-## App Android (OwAlarm)
-
-Pacote `com.henrique.owalarm`. Principais características:
-
-- Leitura de QR Code (ou entrada manual de IP) pra conectar ao PC.
-- Foreground Service com WebSocket persistente, reconecta sozinho,
-  usa WakeLock — validado em cenário real com app em segundo plano,
-  tela apagada, por 30+ minutos.
-- Tela de configuração para trocar o som do alarme por um áudio
-  escolhido pelo usuário, com botão de testar o som.
-- Ao tocar o alarme de verdade, envia de volta uma **confirmação em
-  JSON** pro servidor — é essa confirmação que alimenta o Diagnóstico
-  e o Histórico no PC.
-- Responde a pings de verificação do PC com um pong, permitindo
-  checagem ativa de conexão sem esperar timeout.
-- **Fecha qualquer conexão anterior antes de abrir uma nova** — evita
-  conexões "zumbi" (órfãs) do lado do servidor quando o usuário aperta
-  Conectar de novo (ex.: com senha diferente).
-- **Desconecta automaticamente se os campos de IP/Senha forem
-  editados enquanto conectado** — evita ambiguidade sobre qual
-  credencial está realmente em uso.
-- Identidade visual espelhada da do PC (mesma paleta, mesma hierarquia
-  de cor) — inclusive status bar e navigation bar do Android pintadas
-  com a mesma cor de fundo do app.
-
----
-
-## Débitos técnicos conhecidos / pontos em aberto
-
-- Template matching quebra se você mudar resolução/escala do jogo —
-  vai precisar recalibrar (Configurações → Calibração resolve isso
-  sem reinstalar nada).
-- `THRESHOLD = 0.80` é um ponto de partida, não um valor definitivo —
-  ajuste observando falsos positivos/negativos nos seus testes reais.
-- Ao fechar o programa, o monitor de tela e o servidor são sinalizados
-  e aguardados por até 2 segundos antes da janela ser destruída. Isso
-  evita threads continuarem executando callbacks depois do encerramento
-  da interface.
-- Os testes ficam em `tests/` e os scripts auxiliares em `scripts/`,
-  separando código de produção, testes e ferramentas manuais. A suíte
-  cobre autenticação, servidor WebSocket e persistência de dados.
-- Os instaladores gerados ficam em `releases/`, separados por versão.
-  Essa pasta está no `.gitignore` para não misturar binários pesados
-  com o código-fonte; guarde cópias em um local de releases ou backup.
-- O Inno Setup precisa estar instalado para compilar
-  `installer/TalonMatchAlarm.iss`; o compilador `iscc` não faz parte do
-  ambiente Python do projeto.
-- O versionamento usa `version.py`; ainda falta definir o processo de
-  publicação das releases e respectivas tags no GitHub.
-- Na primeira execução de um `.exe` novo (build diferente do
-  anterior), o Windows Firewall pede permissão de novo — isso é
-  esperado e documentado, não é bug.
+Para Windows, baixe `TalonMatchAlarm-Setup-VERSAO.exe`. O APK do Android é
+publicado separadamente na mesma release quando disponível.

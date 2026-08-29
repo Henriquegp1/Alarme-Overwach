@@ -49,6 +49,8 @@ _MAX_PINGS_SEM_RESPOSTA = 2
 
 # Conexões websocket ativas E autenticadas (celulares conectados).
 _conexoes: set[WebSocket] = set()
+_dispositivos: dict[WebSocket, str] = {}
+_conexoes_por_dispositivo: dict[str, WebSocket] = {}
 
 # Usado só pela verificação manual (botão 🔄 na GUI): quando um pong é
 # aguardado para uma conexão específica, o Event correspondente fica
@@ -67,6 +69,7 @@ _server_loop: asyncio.AbstractEventLoop | None = None
 # do mesmo jeito que já é feito com notificar_partida_encontrada.
 _on_conexao_mudou = None
 _callback_evento = None
+_callback_confirmacao = None
 
 
 def definir_callback_conexao(callback):
@@ -81,7 +84,10 @@ def definir_callback_evento(callback):
 
 def _avisar_evento(texto: str):
     if _callback_evento is not None:
-        _callback_evento(texto)
+        try:
+            _callback_evento(texto)
+        except Exception:
+            logger.exception("Callback de evento do servidor falhou")
 
 def definir_callback_confirmacao(cb):
     global _callback_confirmacao
@@ -90,7 +96,34 @@ def definir_callback_confirmacao(cb):
 
 def _avisar_mudanca_conexao():
     if _on_conexao_mudou is not None:
-        _on_conexao_mudou(len(_conexoes))
+        try:
+            _on_conexao_mudou(len(_conexoes))
+        except Exception:
+            logger.exception("Callback de conexão do servidor falhou")
+
+
+async def _registrar_dispositivo(websocket: WebSocket, device_id: str) -> None:
+    """Mantém uma única sessão ativa por dispositivo identificado."""
+    conexao_anterior = _conexoes_por_dispositivo.get(device_id)
+    if conexao_anterior is not None and conexao_anterior is not websocket:
+        _conexoes.discard(conexao_anterior)
+        _dispositivos.pop(conexao_anterior, None)
+        try:
+            await conexao_anterior.close(
+                code=status.WS_1008_POLICY_VIOLATION,
+                reason="Nova sessão do mesmo dispositivo",
+            )
+        except Exception:
+            logger.info("Sessão duplicada já estava encerrada: %s", device_id)
+        _avisar_evento(f"Sessão duplicada encerrada para o dispositivo {device_id}")
+        _avisar_mudanca_conexao()
+
+    _dispositivos[websocket] = device_id
+    _conexoes_por_dispositivo[device_id] = websocket
+    await websocket.send_json({
+        "tipo": "dispositivo_registrado",
+        "device_id": device_id,
+    })
 
 
 @app.get("/ping")
@@ -158,10 +191,26 @@ async def websocket_endpoint(websocket: WebSocket):
             pings_sem_resposta = 0  # qualquer mensagem prova que a conexão está viva
             try:
                 dados = json.loads(texto)
+                if not isinstance(dados, dict):
+                    logger.warning("Mensagem WebSocket ignorada: objeto JSON esperado")
+                    continue
                 # Dispara o aviso para o gui.py se o celular mandar o status certo
-                if dados.get("status") == "ALARME_RECEBIDO_CELULAR":
+                if dados.get("tipo") == "registrar_dispositivo":
+                    device_id = dados.get("device_id")
+                    if (
+                        isinstance(device_id, str)
+                        and device_id.strip() == device_id
+                        and 1 <= len(device_id) <= 128
+                    ):
+                        await _registrar_dispositivo(websocket, device_id)
+                    else:
+                        logger.warning("device_id inválido recebido de %s", ip_cliente)
+                elif dados.get("status") == "ALARME_RECEBIDO_CELULAR":
                     if _callback_confirmacao:
-                        _callback_confirmacao()
+                        try:
+                            _callback_confirmacao()
+                        except Exception:
+                            logger.exception("Callback de confirmação do servidor falhou")
                 elif dados.get("tipo") == "pong":
                     # Resposta ao ping -- só importa se alguém estiver
                     # esperando por ela agora (verificação manual via
@@ -177,6 +226,9 @@ async def websocket_endpoint(websocket: WebSocket):
         pass
     finally:
         _conexoes.discard(websocket)
+        device_id = _dispositivos.pop(websocket, None)
+        if device_id is not None and _conexoes_por_dispositivo.get(device_id) is websocket:
+            _conexoes_por_dispositivo.pop(device_id, None)
         _aguardando_pong.pop(websocket, None)
         _avisar_mudanca_conexao()
 
@@ -316,6 +368,9 @@ class ServidorThread(threading.Thread):
         try:
             loop.run_until_complete(self._server.serve())
         finally:
+            if not self._server.should_exit:
+                logger.error("Servidor encerrou inesperadamente")
+                _avisar_evento("Servidor encerrou inesperadamente")
             _server_loop = None
             loop.close()
 
