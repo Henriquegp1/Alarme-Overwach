@@ -1,4 +1,6 @@
-# Overwatch Match Alarm
+# Match Alarm
+
+**Licença:** este projeto é gratuito para uso pessoal e não-comercial, sob a [PolyForm Noncommercial License 1.0.0](LICENSE). Uso comercial (venda, revenda ou distribuição paga) não é permitido sem autorização do autor. **Autor:** Henrique Gonçalves Pereira — [github.com/Henriquegp1](https://github.com/Henriquegp1) Se quiser apoiar o projeto, considere uma doação: https://ko-fi.com/henweekz
 
 Aplicativo para Windows que detecta a tela **Partida Encontrada** do
 Overwatch por captura de tela e envia um alarme para celulares conectados
@@ -187,6 +189,23 @@ um conjunto de ajustes focados em ergonomia e consistência visual:
 
 Esses refinamentos fazem parte do fluxo atual do produto e fazem o sistema
 parecer mais natural, estável e melhor alinhado ao uso real em desktop.
+
+### Ajustes finais de navegação e scroll
+
+A tela de configurações passou por um ajuste de performance e ergonomia para
+melhorar o comportamento em rolagem rápida:
+
+- o scroll foi concentrado na área de configurações em vez de ser capturado
+  globalmente pela janela inteira;
+- a velocidade do movimento foi ajustada para reduzir a sensação de travamento
+  quando o usuário rola rapidamente;
+- o sistema foi otimizado para evitar atualização excessiva do layout durante
+  o arraste/rolagem, preservando uma navegação mais fluida;
+- a janela foi compactada para abrir sem espaço vazio desnecessário e manter a
+  proporção da área útil da aplicação.
+
+Esses refinamentos foram feitos para melhorar a resposta visual da interface,
+principalmente em telas longas e em uso com wheel do mouse.
 
 ## Diagnóstico e histórico
 
