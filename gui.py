@@ -41,9 +41,12 @@ from server import (
     definir_callback_conexao,
     definir_callback_evento,
     definir_callback_confirmacao,
+    definir_callback_novo_cliente,
+    definir_callback_comando_remoto,
     notificar_partida_encontrada,
+    notificar_perfil_ativo,
+    notificar_status_monitor,
     verificar_conexoes_agora,
-    desconectar_todos_por_troca_de_senha,
     desconectar_todos_por_reautenticacao,
 )
 from utils import obter_ip_local
@@ -433,6 +436,8 @@ class App(ctk.CTk):
         definir_callback_conexao(self._on_conexao_mudou)
         definir_callback_evento(self._on_evento_servidor)
         definir_callback_confirmacao(self._on_confirmacao_recebida)
+        definir_callback_novo_cliente(self._on_novo_celular_conectado)
+        definir_callback_comando_remoto(self._on_comando_remoto)
 
         self._servidor = ServidorThread(port=PORTA_SERVIDOR)
         self._servidor.start()
@@ -449,6 +454,22 @@ class App(ctk.CTk):
         self.btn_testar_alarme.configure(state="normal")
         self.btn_copiar_token.configure(state="normal")
         self.btn_regenerar_token.configure(state="normal")
+
+    def _on_novo_celular_conectado(self, websocket):
+        """Chamado pelo servidor quando um novo celular conecta."""
+        # Envia o perfil ativo e o status do monitor imediatamente para o novo celular
+        notificar_perfil_ativo(self._perfil_ativo)
+
+        ativo = self.btn_parar.cget("state") == "normal"
+        cooldown = time.monotonic() < self._cooldown_ate
+        notificar_status_monitor(ativo, cooldown)
+
+    def _on_comando_remoto(self, comando):
+        """Executa um comando recebido do celular."""
+        if comando == "iniciar":
+            self.after(0, self.iniciar)
+        elif comando == "parar":
+            self.after(0, self.parar)
 
     def _parar_servidor(self):
         """Só chamado ao fechar o app -- ver _ao_fechar."""
@@ -555,6 +576,7 @@ class App(ctk.CTk):
         self._monitor.start()
 
         self.label_status.configure(text="● Monitorando...", text_color=theme.GREEN_OK)
+        notificar_status_monitor(ativo=True, cooldown=False)
         self.btn_iniciar.configure(state="disabled")
         self.btn_parar.configure(state="normal")
 
@@ -583,6 +605,11 @@ class App(ctk.CTk):
         if hasattr(self, "_var_evento"):
             self._var_evento.set(self._evento_ativo)
             self._menu_evento.configure(values=[evento["nome"] for evento in perfis.listar_eventos_perfil(nome)])
+
+        # Avisar ao celular sobre a troca de perfil
+        from server import notificar_perfil_ativo
+        notificar_perfil_ativo(nome)
+
         self._atualizar_status_perfil()
 
     def _selecionar_evento(self, nome_evento: str):
@@ -741,6 +768,7 @@ class App(ctk.CTk):
 
         self.label_status.configure(text="● Pronto para iniciar", text_color=theme.BLUE)
         self._atualizar_status_confianca()
+        notificar_status_monitor(ativo=False, cooldown=False)
         if estava_rodando:
             self._registrar_evento(tipo_evento=eventos.TipoEvento.SERVIDOR_PARADO)
         self.btn_iniciar.configure(state="normal")
@@ -801,6 +829,7 @@ class App(ctk.CTk):
             self._cooldown_ate = time.monotonic() + COOLDOWN_APOS_MATCH
             self._atualizar_cooldown()
             self._atualizar_status_confianca(self._threshold)
+            notificar_status_monitor(ativo=True, cooldown=True)
             self._registrar_evento(tipo_evento=eventos.TipoEvento.PARTIDA_ENCONTRADA)
             if self._celulares_conectados == 0:
                 self._registrar_evento(tipo_evento=eventos.TipoEvento.SEM_CELULAR_CONECTADO)
@@ -816,6 +845,7 @@ class App(ctk.CTk):
             self.after(100, self._atualizar_cooldown)
         elif self.btn_parar.cget("state") == "normal":
             self.label_status.configure(text="● Monitorando...", text_color=theme.GREEN_OK)
+            notificar_status_monitor(ativo=True, cooldown=False)
 
     def _on_near_match(self, confianca: float):
         """Atualiza apenas o diagnóstico visual, sem poluir o histórico."""

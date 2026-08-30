@@ -70,6 +70,8 @@ _server_loop: asyncio.AbstractEventLoop | None = None
 _on_conexao_mudou = None
 _callback_evento = None
 _callback_confirmacao = None
+_callback_novo_cliente = None
+_callback_comando_remoto = None
 
 
 def definir_callback_conexao(callback):
@@ -92,6 +94,14 @@ def _avisar_evento(texto: str):
 def definir_callback_confirmacao(cb):
     global _callback_confirmacao
     _callback_confirmacao = cb
+
+def definir_callback_novo_cliente(cb):
+    global _callback_novo_cliente
+    _callback_novo_cliente = cb
+
+def definir_callback_comando_remoto(cb):
+    global _callback_comando_remoto
+    _callback_comando_remoto = cb
 
 
 def _avisar_mudanca_conexao():
@@ -166,6 +176,14 @@ async def websocket_endpoint(websocket: WebSocket):
     _conexoes.add(websocket)
     _avisar_mudanca_conexao()
 
+    # Tenta obter o perfil ativo da GUI (através de uma referência global ou função)
+    # Como não temos acesso direto ao objeto App aqui, o ideal é que a GUI
+    # nos informe. Mas para a conexão inicial, podemos disparar um sinal
+    # pedindo o perfil atual ou simplesmente esperar a GUI chamar notificar_perfil_ativo.
+    # Para garantir a sincronização imediata, avisamos que um novo celular entrou.
+    if _callback_novo_cliente:
+        _callback_novo_cliente(websocket)
+
     pings_sem_resposta = 0
     try:
         while True:
@@ -205,6 +223,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         await _registrar_dispositivo(websocket, device_id)
                     else:
                         logger.warning("device_id inválido recebido de %s", ip_cliente)
+                elif dados.get("tipo") == "comando_remoto":
+                    comando = dados.get("comando")
+                    if _callback_comando_remoto:
+                        try:
+                            _callback_comando_remoto(comando)
+                        except Exception:
+                            logger.exception("Callback de comando remoto falhou")
                 elif dados.get("status") == "ALARME_RECEBIDO_CELULAR":
                     if _callback_confirmacao:
                         try:
@@ -234,24 +259,57 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 async def _broadcast_partida_encontrada():
+    await _broadcast_json({"status": "PARTIDA_ENCONTRADA"})
+
+
+async def avisar_perfil_ativo_todos(nome_perfil: str):
+    """Avisa a todos os celulares conectados qual o perfil de jogo ativo."""
+    await _broadcast_json({
+        "tipo": "perfil_ativo",
+        "nome": nome_perfil
+    })
+
+
+async def avisar_status_monitor_todos(ativo: bool, cooldown: bool):
+    """Avisa a todos os celulares o estado atual da detecção no PC."""
+    await _broadcast_json({
+        "tipo": "status_monitor",
+        "ativo": ativo,
+        "cooldown": cooldown
+    })
+
+
+async def _broadcast_json(dados: dict):
     if not _conexoes:
-        logger.warning("Partida encontrada, mas nenhum celular está conectado")
         return
 
     conexoes_mortas = []
     for ws in _conexoes:
         try:
-            await ws.send_json({"status": "PARTIDA_ENCONTRADA"})
+            await ws.send_json(dados)
         except Exception:
             conexoes_mortas.append(ws)
+
     if conexoes_mortas:
         for ws in conexoes_mortas:
             _conexoes.discard(ws)
-        # Antes, essa limpeza acontecia em silêncio -- a GUI só ficava
-        # sabendo que uma conexão morreu na próxima vez que qualquer
-        # outro evento disparasse _avisar_mudanca_conexao(), o que podia
-        # nunca acontecer. Avisar aqui também fecha essa lacuna.
         _avisar_mudanca_conexao()
+
+
+def notificar_perfil_ativo(nome_perfil: str):
+    """Ponto de entrada síncrono para avisar qual perfil está ativo."""
+    if _server_loop is not None and _server_loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            avisar_perfil_ativo_todos(nome_perfil), _server_loop
+        )
+
+
+def notificar_status_monitor(ativo: bool, cooldown: bool):
+    """Ponto de entrada síncrono para avisar o status do monitor."""
+    if _server_loop is not None and _server_loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            avisar_status_monitor_todos(ativo, cooldown), _server_loop
+        )
 
 
 async def _verificar_conexoes_vivas():
