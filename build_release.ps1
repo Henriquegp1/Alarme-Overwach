@@ -5,7 +5,7 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') {
     throw "Versao invalida em version.py: $version"
 }
 
-& ".\venv\Scripts\python.exe" -m PyInstaller --clean TalonMatchAlarm.spec
+& ".\venv\Scripts\python.exe" -m PyInstaller --clean GameSentinel.spec
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $iscc = (Get-Command "ISCC.exe" -ErrorAction SilentlyContinue).Source
@@ -21,7 +21,7 @@ if (-not $iscc) {
     throw "Inno Setup nao encontrado. Instale-o ou adicione ISCC.exe ao PATH."
 }
 
-& $iscc "/dMyAppVersion=$version" "installer\TalonMatchAlarm.iss"
+& $iscc "/dMyAppVersion=$version" "installer\GameSentinel.iss"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "Release $version gerado em releases\"

@@ -316,5 +316,5 @@ Versões prontas ficam na página de releases:
 
 <https://github.com/Henriquegp1/App-Alarme/releases>
 
-Para Windows, baixe `TalonMatchAlarm-Setup-VERSAO.exe`. O APK do Android é
+Para Windows, baixe `GameSentinel-Setup-VERSAO.exe`. O APK do Android é
 publicado separadamente na mesma release quando disponível.

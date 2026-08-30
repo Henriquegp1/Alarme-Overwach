@@ -22,7 +22,7 @@ exe = EXE(
     analysis.binaries,
     analysis.datas,
     [],
-    name='TalonMatchAlarm',
+    name='GameSentinel',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

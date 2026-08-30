@@ -69,7 +69,7 @@ class App(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        self.title(f"Overwatch Match Alarm v{VERSAO}")
+        self.title(f"Game Sentinel v{VERSAO}")
         self.geometry("400x360")  # tamanho inicial compacto para evitar a janela enorme em tela cheia
         self.minsize(350, 300)
         self.resizable(True, True)
@@ -213,11 +213,11 @@ class App(ctk.CTk):
         frame_texto = ctk.CTkFrame(frame_marca, fg_color="transparent")
         frame_texto.pack(side="left")
         ctk.CTkLabel(
-            frame_texto, text="MATCH ALARM", font=theme.font_marca(24),
+            frame_texto, text="GAME SENTINEL", font=theme.font_marca(24),
             text_color=theme.TEXT_PRIMARY,
         ).pack(anchor="w")
         ctk.CTkLabel(
-            frame_texto, text="OVERWATCH", font=theme.font_corpo_bold(12),
+            frame_texto, text="READY TO PLAY", font=theme.font_corpo_bold(12),
             text_color=theme.BLUE,
         ).pack(anchor="w", pady=(4, 0))
 
@@ -251,7 +251,7 @@ class App(ctk.CTk):
         ).pack(side="right", anchor="n", padx=(0, 6))
 
         ctk.CTkLabel(
-            frame_titulo, text="MATCH ALARM",
+            frame_titulo, text="GAME SENTINEL",
             font=theme.font_marca(22), text_color=theme.TEXT_PRIMARY,
         ).pack(anchor="w")
         self._label_nome_perfil = ctk.CTkLabel(
@@ -945,7 +945,7 @@ class App(ctk.CTk):
         ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(200, 200))
         self.label_qr.configure(image=ctk_img, text="")
 
-    def _rolar_tela_configuracoes(self, event, multiplicador: int = 4):
+    def _rolar_tela_configuracoes(self, event, multiplicador: int = 20):
         if not self.tela_configuracoes.winfo_ismapped() or self._scroll_configuracoes is None:
             return "break"
         canvas = getattr(self._scroll_configuracoes, "_parent_canvas", None)
